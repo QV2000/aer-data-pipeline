@@ -1,0 +1,724 @@
+# AER Data Pipeline - Source Registry
+# All datasets must be public and verifiable from AER/Alberta Open Data pages
+# HTML index pages are scraped for current download links (not hardcoded URLs)
+
+defaults:
+  timezone: America/Edmonton
+  public_source: true
+  redistributable: false  # Conservative default; override per dataset
+
+datasets:
+  # ============================================================================
+  # FACILITIES (ST102)
+  # Source: https://www.aer.ca/providing-information/data-and-reports/statistical-reports/st102
+  # ============================================================================
+  
+  st102_active_facilities:
+    province: AB
+    name: "ST102 Active Facilities"
+    description: "List of active batteries, gas plants, meter stations, and other facilities"
+    source_type: html_index
+    index_url: "https://www.aer.ca/providing-information/data-and-reports/statistical-reports/st102"
+    link_pattern: "ActiveFacility\\.txt$"
+    expected_cadence: monthly
+    download_format: txt
+    parser: parsers.txt_parser.parse_st102_facility
+    schema:
+      required_columns:
+        - facility_id
+        - facility_name
+        - operator_name
+        - facility_type
+        - status
+      primary_keys: [facility_id]
+    validation:
+      min_rows: 50000
+      max_row_delta_pct: 20
+
+  st102_inactive_facilities:
+    province: AB
+    name: "ST102 Inactive Facilities"
+    description: "List of inactive/abandoned facilities"
+    source_type: html_index
+    index_url: "https://www.aer.ca/providing-information/data-and-reports/statistical-reports/st102"
+    link_pattern: "InactiveFacility\\.txt$"
+    expected_cadence: monthly
+    download_format: txt
+    parser: parsers.txt_parser.parse_st102_facility
+    schema:
+      required_columns:
+        - facility_id
+        - facility_name
+        - operator_name
+        - facility_type
+        - status
+      primary_keys: [facility_id]
+    validation:
+      min_rows: 10000
+
+  st102_facilities_shapefile:
+    province: AB
+    name: "ST102 Facilities Shapefile"
+    description: "Geocoded facility locations"
+    source_type: html_index
+    index_url: "https://www.aer.ca/providing-information/data-and-reports/statistical-reports/st102"
+    link_pattern: "ST102-SHP\\.zip$"
+    expected_cadence: monthly
+    download_format: zip_shp
+    parser: parsers.shapefile_parser.parse_shapefile
+    geo_config:
+      output_crs: "EPSG:4326"
+      include_centroids: true
+    schema:
+      primary_keys: [facility_id]
+      geo_fields: [geometry, centroid_lon, centroid_lat]
+
+  # ============================================================================
+  # PIPELINES (Spatial Data)
+  # Source: https://www.aer.ca/providing-information/data-and-reports/maps-and-shapefiles
+  # ============================================================================
+  
+  enhanced_pipeline_shapefile:
+    province: AB
+    name: "Enhanced Pipeline Shapefile"
+    description: "Pipeline lines and installations across Alberta"
+    source_type: html_index
+    index_url: "https://www.aer.ca/data-and-performance-reports/activity-and-data/spatial-data"
+    link_pattern: "Pipeline.*_SHP\\.zip$"
+    multi_file: true
+    expected_cadence: monthly
+    download_format: zip_shp
+    parser: parsers.shapefile_parser.parse_shapefile
+    geo_config:
+      output_crs: "EPSG:4326"
+      include_centroids: true
+      timeout_seconds: 300  # Large files
+    schema:
+      primary_keys: [pipeline_licence, line_no]
+      geo_fields: [geometry, centroid_lon, centroid_lat]
+    validation:
+      min_rows: 100000
+
+  # ============================================================================
+  # WELLS - Reference Data
+  # ============================================================================
+
+  confidential_well_list:
+    province: AB
+    name: "Confidential Well List"
+    description: "Daily list of Alberta wells with confidential status"
+    source_type: direct_file
+    url: "https://static.aer.ca/prd/data/conwell/ConWell.txt"
+    expected_cadence: daily
+    download_format: txt
+    parser: parsers.txt_parser.parse_confidential_well_list
+    schema:
+      primary_keys: [uwi]
+      required_columns: [uwi, release_date]
+    amendment_handling:
+      upsert_keys: [uwi]
+
+  # NOTE: general_well_data_file removed - requires catalog portal access (not yet implemented)
+
+  # ============================================================================
+  # PRODUCTION - Time Series
+  # ============================================================================
+  
+  # NOTE: well_production_data_file removed - use petrinex_production instead (free, last 5 years)
+
+  petrinex_production:
+    province: AB
+    name: "Petrinex Conventional Volumetric Data"
+    description: "Well and facility production volumes from Petrinex (Free, Last 5 Years)"
+    source_type: static_url # We will handle the date range in the downloader logic
+    url: "https://www.petrinex.gov.ab.ca/publicdata/API/Files/AB/Vol/{date}/CSV"
+    expected_cadence: monthly
+    download_format: zip_csv
+    parser: parsers.txt_parser.parse_petrinex_production
+    amendment_handling:
+      enabled: true
+      upsert_keys: [uwi, production_month, activity, product]
+    schema:
+      primary_keys: [uwi, production_month, activity, product]
+
+
+  # ============================================================================
+  # WELLS - ST37 (List of Wells)
+  # Source: https://www.aer.ca/providing-information/data-and-reports/statistical-reports/st37
+  # ============================================================================
+  
+  st37_wells_txt:
+    province: AB
+    name: "ST37 List of Wells (TXT)"
+    description: "Monthly list of all wells in Alberta with detailed attributes"
+    source_type: html_index
+    index_url: "https://www.aer.ca/data-and-performance-reports/statistical-reports/st37"
+    link_pattern: "ST37\\.zip$" # Matches ST37.zip
+    expected_cadence: monthly
+    download_format: zip_txt
+    parser: parsers.txt_parser.parse_st37_wells
+    schema:
+      primary_keys: [uwi]
+      required_columns:
+        - uwi                 # UWI_DISPLAY_FORMAT (e.g., 00/06-06-001-01W4/0)
+        - uwi_id              # LOC-DESC key for joins (e.g., 14010606000)
+        - well_name           # Well name
+        - field_code          # Field code (links to field reference data)
+        - licence_no          # Licence number
+        - licence_status      # Licence status (e.g., RecCertified)
+        - licensee_code       # BA code for licensee (e.g., A5D40)
+        - well_stat_code      # Well status code
+        - well_stat_date      # Well status date (YYYYMMDD)
+        - mode                # Mode (ABD=abandoned, etc.)
+      optional_columns:
+        - update_flag
+        - pool_code
+        - os_area_code
+        - os_dep_code
+        - licence_issue_date
+        - agent_code
+        - operator_code
+        - fin_drl_date        # Finished drilling date
+        - well_total_depth    # Total depth in meters
+        - fluid
+        - type
+        - structure
+
+
+  # NOTE: ST37 shapefiles removed - coordinates are in st37_wells_txt already
+
+  # ============================================================================
+  # WELLS - ST49 (Daily Spud)
+  # Source: https://www.aer.ca/providing-information/data-and-reports/statistical-reports/st49
+  # ============================================================================
+  
+  st49_daily_spud:
+    province: AB
+    name: "ST49 Daily Spud List"
+    description: "Daily spud data for active drilling"
+    source_type: html_index
+    index_url: "https://www.aer.ca/data-and-performance-reports/statistical-reports/st49"
+    link_pattern: "(?i)SPUD.*\\.txt$" # Case-insensitive match for SPUDSun.txt, etc.
+    expected_cadence: daily
+    download_format: txt
+    parser: parsers.txt_parser.parse_st49_spud
+    multi_file: true
+    schema:
+      required_columns:
+        - spud_date
+        - licence_number
+        - uwi
+        - drilling_contractor
+      primary_keys: [uwi, spud_date]
+
+  st1_well_licences:
+    province: AB
+    name: "ST1 Well Licences Issued"
+    description: "Daily list of well licences issued"
+    source_type: html_index
+    index_url: "https://www.aer.ca/data-and-performance-reports/statistical-reports/st1"
+    link_pattern: "(?i)WELLS.*\\.TXT$" # Case-insensitive match for WELLSSUN.TXT, etc.
+    expected_cadence: daily
+    download_format: txt
+    parser: parsers.txt_parser.parse_st1_licences
+    multi_file: true
+    schema:
+      primary_keys: [licence_number]
+
+
+  # ============================================================================
+  # HISTORICAL ARCHIVES - ST1 & ST49
+  # These provide backfill data beyond the rolling 7-day window
+  # ============================================================================
+
+  st1_well_licences_archive:
+    province: AB
+    name: "ST1 Well Licences Archive"
+    description: "Historical monthly/yearly archives of well licences issued (2015-2026)"
+    source_type: archive_list
+    archive_urls:
+      # 2026 monthly archives
+      - "https://www.aer.ca/prd/data/well-lic/dwll2026-02.zip"
+      - "https://www.aer.ca/prd/data/well-lic/dwll2026-01.zip"
+      # 2025 monthly archives
+      - "https://www.aer.ca/prd/data/well-lic/dwll2025-12.zip"
+      - "https://www.aer.ca/prd/data/well-lic/dwll2025-11.zip"
+      - "https://www.aer.ca/prd/data/well-lic/dwll2025-10.zip"
+      - "https://www.aer.ca/prd/data/well-lic/dwll2025-09.zip"
+      - "https://www.aer.ca/prd/data/well-lic/dwll2025-08.zip"
+      - "https://www.aer.ca/prd/data/well-lic/dwll2025-07.zip"
+      - "https://www.aer.ca/prd/data/well-lic/dwll2025-06.zip"
+      - "https://www.aer.ca/prd/data/well-lic/dwll2025-05.zip"
+      - "https://www.aer.ca/prd/data/well-lic/dwll2025-04.zip"
+      - "https://www.aer.ca/prd/data/well-lic/dwll2025-03.zip"
+      - "https://www.aer.ca/prd/data/well-lic/dwll2025-02.zip"
+      - "https://www.aer.ca/prd/data/well-lic/dwll2025-01.zip"
+      # Yearly archives (2015-2024)
+      - "https://www.aer.ca/prd/data/well-lic/dwll2024.zip"
+      - "https://www.aer.ca/data/well-lic/dwll2023.zip"
+      - "https://www.aer.ca/data/well-lic/dwll2022.zip"
+      - "https://www.aer.ca/data/well-lic/dwll2021.zip"
+      - "https://www.aer.ca/data/well-lic/dwll2020.zip"
+      - "https://www.aer.ca/data/well-lic/dwll2019.zip"
+      - "https://www.aer.ca/data/well-lic/dwll2018.zip"
+      - "https://www.aer.ca/data/well-lic/dwll2017.zip"
+      - "https://www.aer.ca/data/well-lic/dwll2016.zip"
+      - "https://www.aer.ca/data/well-lic/dwll2015.zip"
+    expected_cadence: monthly
+    download_format: zip_txt
+    parser: parsers.txt_parser.parse_st1_licences
+    multi_file: true
+    schema:
+      primary_keys: [licence_number]
+      required_columns:
+        - licence_number
+        - licence_date
+
+  st49_spud_archive:
+    province: AB
+    name: "ST49 Daily Spud Archive"
+    description: "Historical monthly/yearly archives of well spud activity (2015-2026)"
+    source_type: archive_list
+    archive_urls:
+      # 2026 monthly archives
+      - "https://www.aer.ca/prd/data/wells/spud2026-02.zip"
+      - "https://www.aer.ca/prd/data/wells/spud2026-01.zip"
+      # 2025 monthly archives
+      - "https://www.aer.ca/prd/data/wells/spud2025-12.zip"
+      - "https://www.aer.ca/prd/data/wells/spud2025-11.zip"
+      - "https://www.aer.ca/prd/data/wells/spud2025-10.zip"
+      - "https://www.aer.ca/prd/data/wells/spud2025-09.zip"
+      - "https://www.aer.ca/prd/data/wells/spud2025-08.zip"
+      - "https://www.aer.ca/prd/data/wells/spud2025-07.zip"
+      - "https://www.aer.ca/prd/data/wells/spud2025-06.zip"
+      - "https://www.aer.ca/prd/data/wells/spud2025-05.zip"
+      - "https://www.aer.ca/prd/data/wells/spud2025-04.zip"
+      - "https://www.aer.ca/prd/data/wells/spud2025-03.zip"
+      - "https://www.aer.ca/prd/data/wells/spud2025-02.zip"
+      - "https://www.aer.ca/prd/data/wells/spud2025-01.zip"
+      # Yearly archives (2015-2024)
+      - "https://www.aer.ca/prd/data/wells/spud_2024.zip"
+      - "https://www.aer.ca/data/wells/spud2023.zip"
+      - "https://www.aer.ca/data/wells/spud2022.zip"
+      - "https://www.aer.ca/data/wells/spud2021.zip"
+      - "https://static.aer.ca/prd/data/wells/spud2020.zip"
+      - "https://www.aer.ca/data/wells/spud2019.zip"
+      - "https://www.aer.ca/data/wells/spud2018.zip"
+      - "https://www.aer.ca/data/wells/spud2017.zip"
+      - "https://www.aer.ca/data/wells/spud2016.zip"
+      - "https://www.aer.ca/data/wells/spud2015.zip"
+    expected_cadence: monthly
+    download_format: zip_txt
+    parser: parsers.txt_parser.parse_st49_spud
+    multi_file: true
+    schema:
+      required_columns:
+        - spud_date
+        - licence_number
+        - uwi
+      primary_keys: [uwi, spud_date]
+
+  # ============================================================================
+  # OPEN ALBERTA
+  # ============================================================================
+  
+  # NOTE: open_alberta_facility_codes removed - open_data_api not yet implemented
+
+  # ============================================================================
+  # ST2 - WEEKLY DRILLING & STATUS CHANGES
+  # Source: https://www.aer.ca/data-and-performance-reports/statistical-reports/st2
+  # ============================================================================
+
+  st2_weekly_status_changes:
+    province: AB
+    name: "ST2 Weekly Status Changes"
+    description: "Weekly report of well status changes (drilling, completed, suspended, abandoned)"
+    source_type: tableau_csv
+    index_url: "https://www.aer.ca/data-and-performance-reports/statistical-reports/st2"
+    download_urls:
+      - "https://www2.aer.ca/t/Production/views/PRD_0010_ST2_IMB_Weekly_Status_Changes_CSV_EXT/WeeklyStatusChangesReport.csv"
+      - "https://www2.aer.ca/t/Production/views/PRD_0010_ST2_IMB_Weekly_Status_Changes_CSV_EXT/WeeklyAbandonmentStatusChangesReport.csv"
+    expected_cadence: weekly
+    download_format: csv
+    multi_file: true
+    parser: parsers.csv_parser.parse_st2_status_changes
+    schema:
+      required_columns:
+        - uwi
+        - status_change_date
+        - new_status
+      primary_keys: [uwi, status_change_date]
+    validation:
+      min_rows: 100
+
+  st2_weekly_drilling:
+    province: AB
+    name: "ST2 Weekly Drilling Report"
+    description: "Weekly drilling activity report"
+    source_type: tableau_csv
+    index_url: "https://www.aer.ca/data-and-performance-reports/statistical-reports/st2"
+    download_urls:
+      - "https://www2.aer.ca/t/Production/views/PRD_0025_ST2_IMB_Weekly_Drilling_Report_CSV_EXT/WeeklyDrillingReport.csv"
+    expected_cadence: weekly
+    download_format: csv
+    parser: parsers.csv_parser.parse_st2_drilling
+    schema:
+      required_columns:
+        - uwi
+        - drilling_date
+      primary_keys: [uwi, drilling_date]
+
+  # ============================================================================
+  # ST3 - PROVINCIAL STATISTICS (Monthly Production by Product)
+  # Source: https://www.aer.ca/data-and-performance-reports/statistical-reports/st3
+  # ============================================================================
+
+  st3_provincial_stats_archive:
+    province: AB
+    name: "ST3 Provincial Statistics Archive"
+    description: "Monthly provincial production statistics by product type (2010-2024)"
+    source_type: archive_list
+    archive_urls:
+      # Oil production stats
+      - "https://www.aer.ca/documents/sts/st3/Oil_current.xlsx"
+      - "https://www.aer.ca/2025-02/ST3_Oil_2024.xlsx"
+      - "https://www.aer.ca/documents/sts/st3/ST3_2023-12_Oil.xlsx"
+      - "https://www.aer.ca/documents/sts/st3/ST3_2022-12_Oil.xlsx"
+      - "https://www.aer.ca/documents/sts/st3/ST3_2021-12_Oil.xlsx"
+      - "https://www.aer.ca/documents/sts/st3/Oil_2020.xlsx"
+      - "https://www.aer.ca/documents/sts/st3/Oil_2019.xlsx"
+      - "https://www.aer.ca/documents/sts/st3/Oil_2018.xlsx"
+      - "https://www.aer.ca/documents/sts/st3/Oil_2017.xlsx"
+      - "https://www.aer.ca/documents/sts/st3/Oil_2010-2016.xlsx"
+      # Gas production stats
+      - "https://www.aer.ca/documents/sts/st3/Gas_current.xlsx"
+      - "https://www.aer.ca/2025-02/ST3_Gas_2024.xlsx"
+      - "https://www.aer.ca/documents/sts/st3/ST3_2023-12_Gas.xlsx"
+      - "https://www.aer.ca/documents/sts/st3/ST3_2022-12_Gas.xlsx"
+      - "https://www.aer.ca/documents/sts/st3/ST3_2021-12_Gas.xlsx"
+      - "https://www.aer.ca/documents/sts/st3/Gas_2020.xlsx"
+      - "https://www.aer.ca/documents/sts/st3/Gas_2019.xlsx"
+      - "https://www.aer.ca/documents/sts/st3/Gas_2018.xlsx"
+      - "https://www.aer.ca/documents/sts/st3/Gas_2017.xlsx"
+      - "https://www.aer.ca/documents/sts/st3/Gas_2010-2016.xlsx"
+      # NGL production stats
+      - "https://www.aer.ca/documents/sts/st3/NGL_current.xlsx"
+      - "https://www.aer.ca/2025-02/ST3_NGL_2024.xlsx"
+      - "https://www.aer.ca/documents/sts/st3/ST3_2023-12_NGL.xlsx"
+      - "https://www.aer.ca/documents/sts/st3/ST3_2022-12_NGL.xlsx"
+      - "https://www.aer.ca/documents/sts/st3/ST3_2021-12_NGL.xlsx"
+      - "https://www.aer.ca/documents/sts/st3/NGL_2020.xlsx"
+      - "https://www.aer.ca/documents/sts/st3/NGL_2019.xlsx"
+      - "https://www.aer.ca/documents/sts/st3/NGL_2018.xlsx"
+      - "https://www.aer.ca/documents/sts/st3/NGL_2017.xlsx"
+      - "https://www.aer.ca/documents/sts/st3/NGL_2010-2016.xlsx"
+      # Butane
+      - "https://www.aer.ca/documents/sts/st3/Butane_current.xlsx"
+      - "https://www.aer.ca/2025-02/ST3_Butane_2024.xlsx"
+      - "https://www.aer.ca/documents/sts/st3/ST3_2023-12_Butane.xlsx"
+      - "https://www.aer.ca/documents/sts/st3/Butane_2010-2016.xlsx"
+      # Ethane
+      - "https://www.aer.ca/documents/sts/st3/Ethane_current.xlsx"
+      - "https://www.aer.ca/2025-02/ST3_Ethane_2024.xlsx"
+      - "https://www.aer.ca/documents/sts/st3/ST3_2023-12_Ethane.xlsx"
+      - "https://www.aer.ca/documents/sts/st3/Ethane_2010-2016.xlsx"
+      # Propane
+      - "https://www.aer.ca/documents/sts/st3/Propane_current.xlsx"
+      - "https://www.aer.ca/2025-02/ST3_Propane_2024.xlsx"
+      - "https://www.aer.ca/documents/sts/st3/ST3_2023-12_Propane.xlsx"
+      - "https://www.aer.ca/documents/sts/st3/Propane_2010-2016.xlsx"
+    expected_cadence: monthly
+    download_format: xlsx
+    parser: parsers.xlsx_parser.parse_st3_provincial_stats
+    multi_file: true
+    schema:
+      required_columns:
+        - product_type
+      primary_keys: [product_type, source_year]
+
+  # ============================================================================
+  # WELL-FACILITY LINKS
+  # Source: Petrinex Public Data API (FREE)
+  # ============================================================================
+
+  petrinex_well_facility_link:
+    province: AB
+    name: "Petrinex Well to Facility Link"
+    description: "Maps each well to its linked facility (battery) - critical for pipeline connectivity"
+    source_type: direct_file
+    url: "https://www.petrinex.gov.ab.ca/publicdata/API/Files/AB/Infra/Well%20to%20Facility%20Link/CSV"
+    expected_cadence: monthly
+    download_format: nested_zip_csv  # ZIP containing ZIP containing CSV
+    parser: parsers.csv_parser.parse_petrinex_well_facility_link
+    schema:
+      required_columns:
+        - well_id
+        - well_identifier
+        - linked_facility_id
+        - linked_facility_sub_type
+      primary_keys: [well_id]
+    validation:
+      min_rows: 500000
+
+  # ============================================================================
+  # ABANDONED WELLS
+  # Source: AER Spatial Data
+  # ============================================================================
+
+  abandoned_wells_shapefile:
+    province: AB
+    name: "Abandoned Wells Shapefile"
+    description: "Spatial data for abandoned/decommissioned wells"
+    source_type: direct_file
+    url: "https://www.aer.ca/data/wells/ABNDWells_SHP.zip"
+    expected_cadence: monthly
+    download_format: zip_shp
+    parser: parsers.shapefile_parser.parse_shapefile
+    geo_config:
+      output_crs: "EPSG:4326"
+      include_centroids: true
+    schema:
+      primary_keys: [uwi]
+      geo_fields: [geometry, centroid_lon, centroid_lat]
+    validation:
+      min_rows: 50000
+
+  # ============================================================================
+  # INJECTION / DISPOSAL WELLS
+  # Source: AER Information Hub
+  # ============================================================================
+
+  scheme_approvals_shapefile:
+    province: AB
+    name: "Scheme Approvals Shapefile"
+    description: "Spatial data for injection and disposal scheme approvals"
+    source_type: direct_file
+    url: "https://www.aer.ca/data/shapefiles/Scheme_Approval_SHP.zip"
+    expected_cadence: monthly
+    download_format: zip_shp
+    parser: parsers.shapefile_parser.parse_shapefile
+    geo_config:
+      output_crs: "EPSG:4326"
+      include_centroids: true
+    schema:
+      primary_keys: [scheme_id]
+      geo_fields: [geometry, centroid_lon, centroid_lat]
+    validation:
+      min_rows: 1000
+
+  # ============================================================================
+  # SASKATCHEWAN - PETRINEX DATASETS
+  # Same Petrinex API as AB, just swap AB→SK in URL
+  # ============================================================================
+
+  sk_petrinex_production:
+    province: SK
+    name: "Petrinex SK Conventional Volumetric Data"
+    description: "Saskatchewan well and facility production volumes from Petrinex"
+    source_type: static_url
+    url: "https://www.petrinex.gov.ab.ca/publicdata/API/Files/SK/Vol/{date}/CSV"
+    expected_cadence: monthly
+    download_format: zip_csv
+    parser: parsers.sk_parser.parse_petrinex_sk_production
+    schema:
+      primary_keys: [reporting_facility_id, productionmonth, activityid, productid]
+
+  sk_petrinex_well_infrastructure:
+    province: SK
+    name: "Petrinex SK Well Infrastructure"
+    description: "Saskatchewan well infrastructure data from Petrinex"
+    source_type: direct_file
+    url: "https://www.petrinex.gov.ab.ca/publicdata/API/Files/SK/Infra/Well%20Infrastructure/CSV"
+    expected_cadence: daily
+    download_format: nested_zip_csv
+    parser: parsers.sk_parser.parse_petrinex_sk_well_infrastructure
+    schema:
+      primary_keys: [well_id]
+
+  sk_petrinex_well_licence:
+    province: SK
+    name: "Petrinex SK Well Licence"
+    description: "Saskatchewan well licence data from Petrinex"
+    source_type: direct_file
+    url: "https://www.petrinex.gov.ab.ca/publicdata/API/Files/SK/Infra/Well%20Licence/CSV"
+    expected_cadence: daily
+    download_format: nested_zip_csv
+    parser: parsers.sk_parser.parse_petrinex_sk_well_licence
+    schema:
+      primary_keys: [well_licence_id]
+
+  sk_petrinex_facility_licence:
+    province: SK
+    name: "Petrinex SK Facility Licence"
+    description: "Saskatchewan facility licence data from Petrinex"
+    source_type: direct_file
+    url: "https://www.petrinex.gov.ab.ca/publicdata/API/Files/SK/Infra/Facility%20Licence/CSV"
+    expected_cadence: daily
+    download_format: nested_zip_csv
+    parser: parsers.sk_parser.parse_petrinex_sk_facility_licence
+    schema:
+      primary_keys: [facility_licence_id]
+
+  sk_petrinex_facility_infrastructure:
+    province: SK
+    name: "Petrinex SK Facility Infrastructure"
+    description: "Saskatchewan facility infrastructure data from Petrinex"
+    source_type: direct_file
+    url: "https://www.petrinex.gov.ab.ca/publicdata/API/Files/SK/Infra/Facility%20Infrastructure/CSV"
+    expected_cadence: daily
+    download_format: nested_zip_csv
+    parser: parsers.sk_parser.parse_petrinex_sk_facility_infrastructure
+    schema:
+      primary_keys: [facility_id]
+
+  sk_petrinex_well_facility_link:
+    province: SK
+    name: "Petrinex SK Well to Facility Link"
+    description: "Saskatchewan well-to-facility linkage from Petrinex"
+    source_type: direct_file
+    url: "https://www.petrinex.gov.ab.ca/publicdata/API/Files/SK/Infra/Well%20to%20Facility%20Link/CSV"
+    expected_cadence: daily
+    download_format: nested_zip_csv
+    parser: parsers.sk_parser.parse_petrinex_sk_well_facility_link
+    schema:
+      primary_keys: [well_id]
+
+  sk_petrinex_business_associate:
+    province: SK
+    name: "Petrinex SK Business Associate"
+    description: "Saskatchewan operator/company lookup from Petrinex"
+    source_type: direct_file
+    url: "https://www.petrinex.gov.ab.ca/publicdata/API/Files/SK/Infra/Business%20Associate/CSV"
+    expected_cadence: daily
+    download_format: nested_zip_csv
+    parser: parsers.sk_parser.parse_petrinex_sk_business_associate
+    schema:
+      primary_keys: [ba_id]
+
+  # ============================================================================
+  # SASKATCHEWAN - GOVERNMENT DIRECT DOWNLOADS
+  # ============================================================================
+
+  sk_daily_drilling:
+    province: SK
+    name: "Saskatchewan Daily Drilling Activity"
+    description: "Daily drilling activity report (spuds/rig releases)"
+    source_type: direct_file
+    url: "https://drillingactivity.saskatchewan.ca/User_Files/CurrentDailyDrillingActivity.csv"
+    expected_cadence: daily
+    download_format: csv
+    parser: parsers.sk_parser.parse_sk_daily_drilling
+    schema:
+      primary_keys: [cwi, spud_date]
+
+  sk_well_bulletin:
+    province: SK
+    name: "Saskatchewan Daily Well Bulletin"
+    description: "Daily well bulletin (licences + status changes)"
+    source_type: direct_file
+    url: "https://licensedwells.saskatchewan.ca/User_Files/current_bullfile.csv"
+    expected_cadence: daily
+    download_format: csv
+    parser: parsers.sk_parser.parse_sk_well_bulletin
+    schema:
+      primary_keys: [cwi]
+
+  # ============================================================================
+  # SASKATCHEWAN - PETRINEX REFERENCE TABLES
+  # ============================================================================
+
+  sk_ref_ba_identifiers:
+    province: SK
+    name: "Petrinex SK BA Identifiers"
+    description: "Saskatchewan business associate identifiers lookup"
+    source_type: direct_file
+    url: "https://www.petrinex.gov.ab.ca/bbreportsSK/PRABAIdentifiers.csv"
+    expected_cadence: daily
+    download_format: csv
+    parser: parsers.sk_parser.parse_petrinex_sk_ref_csv
+    schema:
+      primary_keys: [ba_id]
+
+  sk_ref_facility_ids:
+    province: SK
+    name: "Petrinex SK Facility IDs"
+    description: "Saskatchewan facility identifiers lookup"
+    source_type: direct_file
+    url: "https://www.petrinex.gov.ab.ca/bbreportsSK/PRAFacilityIds.csv"
+    expected_cadence: daily
+    download_format: csv
+    parser: parsers.sk_parser.parse_petrinex_sk_ref_csv
+    schema:
+      primary_keys: [facility_id]
+
+  sk_ref_activity_codes:
+    province: SK
+    name: "Petrinex SK Activity Codes"
+    description: "Saskatchewan activity codes lookup"
+    source_type: direct_file
+    url: "https://www.petrinex.gov.ab.ca/bbreportsSK/PRAActivityCodes.csv"
+    expected_cadence: daily
+    download_format: csv
+    parser: parsers.sk_parser.parse_petrinex_sk_ref_csv
+    schema:
+      primary_keys: [activity_code]
+
+  sk_ref_pool_codes:
+    province: SK
+    name: "Petrinex SK Pool Codes"
+    description: "Saskatchewan field and pool codes"
+    source_type: direct_file
+    url: "https://www.petrinex.gov.ab.ca/bbreportsSK/PRAFieldandPoolCodes.csv"
+    expected_cadence: daily
+    download_format: csv
+    parser: parsers.sk_parser.parse_petrinex_sk_ref_csv
+    schema:
+      primary_keys: [pool_code]
+
+  sk_ref_product_codes:
+    province: SK
+    name: "Petrinex SK Product Codes"
+    description: "Saskatchewan product codes"
+    source_type: direct_file
+    url: "https://www.petrinex.gov.ab.ca/bbreportsSK/PRAProductCodes.csv"
+    expected_cadence: daily
+    download_format: csv
+    parser: parsers.sk_parser.parse_petrinex_sk_ref_csv
+    schema:
+      primary_keys: [product_code]
+
+  # ============================================================================
+  # SASKATCHEWAN - PIPELINES (Spatial Data)
+  # Source: Saskatchewan GeoHub / ArcGIS REST Services
+  # ============================================================================
+
+  sk_pipelines:
+    province: SK
+    name: "Saskatchewan Pipelines"
+    description: "Pipeline lines across Saskatchewan from GeoHub ArcGIS service"
+    source_type: arcgis_rest
+    base_url: "https://gis.saskatchewan.ca/arcgis/rest/services/Economy/Pipelines/MapServer/0/query"
+    query_params:
+      where: "1=1"
+      outFields: "*"
+      f: "geojson"
+    pagination:
+      enabled: true
+      page_size: 1000
+      offset_param: "resultOffset"
+      count_param: "resultRecordCount"
+    expected_cadence: daily  # Run with daily cron to ensure data is available
+    download_format: geojson
+    parser: parsers.sk_parser.parse_sk_pipelines
+    geo_config:
+      output_crs: "EPSG:4326"
+      geometry_type: LineString
+    schema:
+      required_columns:
+        - licence_number
+        - owner_name
+        - substance
+      primary_keys: [licence_number, segment_identifier]
+      geo_fields: [geometry, from_lat, from_lon, to_lat, to_lon]
+    validation:
+      min_rows: 4000
