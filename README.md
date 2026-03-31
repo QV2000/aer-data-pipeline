@@ -1,3 +1,9 @@
+[![Tests](https://github.com/QV2000/aer-data-pipeline/actions/workflows/test.yml/badge.svg)](https://github.com/QV2000/aer-data-pipeline/actions/workflows/test.yml)
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
+
+> **Just want the data?** Download pre-built DuckDB and Parquet files from the [Releases page](https://github.com/QV2000/aer-data-pipeline/releases). No code required.
+
 # AER Data Pipeline
 
 Open-source pipeline for ingesting Alberta and Saskatchewan oil & gas public data into a local DuckDB database.
@@ -44,6 +50,15 @@ Run the pipeline and get a single DuckDB database with:
 | `sk_ref_*` | Petrinex SK | Reference tables: BA identifiers, facility IDs, activity codes, pool codes, product codes | Daily |
 
 All data is public and sourced directly from government websites. No scraping of private or paywalled sources.
+
+## What Can You Do With This?
+
+- **Production decline analysis.** Track oil/gas output over time for any well or operator. Identify underperformers early.
+- **Competitive intelligence.** See which operators are licensing, drilling, and producing in specific areas.
+- **Regulatory tracking.** Monitor well status changes (suspensions, abandonments) and new licence approvals across AB and SK.
+- **Land evaluation support.** Cross-reference well production data with location, formation, and pipeline proximity for asset valuation.
+
+See [docs/query_cookbook.md](docs/query_cookbook.md) for 20 ready-to-run SQL examples.
 
 ## Quick Start
 
@@ -188,8 +203,8 @@ LIMIT 10;
 
 -- Wells licensed in the last 30 days
 SELECT * FROM well_licences
-WHERE licence_date >= CURRENT_DATE - INTERVAL '30 days'
-ORDER BY licence_date DESC;
+WHERE issue_date >= CURRENT_DATE - INTERVAL '30 days'
+ORDER BY issue_date DESC;
 
 -- Production decline by operator
 WITH monthly AS (
@@ -221,10 +236,30 @@ ORDER BY yoy_pct DESC;
 | `DATA_DIR` | `./data` | Where raw/bronze/silver files are stored |
 | `DUCKDB_MEMORY_LIMIT` | `2GB` | DuckDB memory limit |
 
+## Units
+
+All production volumes follow Petrinex conventions (metric):
+
+| Measurement | Unit | To convert to Imperial |
+|------------|------|----------------------|
+| Oil | cubic metres (m3) | multiply by 6.29287 for barrels |
+| Gas | thousand cubic metres (e3m3) | multiply by 35.3147 for MCF |
+| Water | cubic metres (m3) | multiply by 6.29287 for barrels |
+| Depth | metres | multiply by 3.28084 for feet |
+
+See [docs/data_dictionary.md](docs/data_dictionary.md) for full schema reference.
+
+## Known Limitations
+
+- Petrinex production data is typically 2 months behind. January data usually becomes available in late March.
+- Confidential wells are excluded from production data until their confidentiality period expires (typically 1 year from rig release).
+- AER occasionally changes file formats for ST reports. The pipeline handles most variations but may need parser updates.
+- Some operators report under multiple licensee codes due to acquisitions. The `operator_groups` view normalizes these where possible.
+
 ## License
 
 Apache 2.0 - see [LICENSE](LICENSE).
 
 ## Contributing
 
-PRs welcome. If you add a new public data source, please include the government URL and update the sources table above.
+PRs welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for how to add datasets, run tests, and submit changes.

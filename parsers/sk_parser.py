@@ -17,7 +17,6 @@ import io
 import logging
 import zipfile
 from pathlib import Path
-from typing import Union
 
 import pandas as pd
 

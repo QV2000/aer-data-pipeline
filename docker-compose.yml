@@ -1,0 +1,19 @@
+services:
+  pipeline:
+    build: .
+    volumes:
+      - pipeline-data:/data
+    command: ["ingest", "--all"]
+
+  datasette:
+    image: datasetteproject/datasette:latest
+    ports:
+      - "8001:8001"
+    volumes:
+      - pipeline-data:/data:ro
+    command: ["datasette", "serve", "/data/aer_data.duckdb", "-p", "8001", "-h", "0.0.0.0"]
+    profiles:
+      - explore
+
+volumes:
+  pipeline-data:

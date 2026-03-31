@@ -10,29 +10,40 @@ Commands:
     status                    Show dataset status
 """
 
-import sys
-import logging
 import gc
-from pathlib import Path
+import logging
+import sys
 from datetime import datetime
-import pandas as pd
-from dateutil.relativedelta import relativedelta
+from pathlib import Path
+
 import requests
-import io
-import zipfile
+from dateutil.relativedelta import relativedelta
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+
+
+def _get_session():
+    """Create a requests session with retry logic for transient failures."""
+    s = requests.Session()
+    s.mount("https://", HTTPAdapter(
+        max_retries=Retry(total=3, backoff_factor=1, status_forcelist=[429, 500, 502, 503])
+    ))
+    return s
 
 import click
 
 # Add project to path
 sys.path.insert(0, str(Path(__file__).parent))
 
-from registry.loader import load_registry
-from downloader.base import PipelineDownloader, DatasetDownloader
-from parsers.txt_parser import parse_st102_facility
+from downloader.base import DatasetDownloader
+from downloader.ingestion_log import IngestionLog
 from parsers.shapefile_parser import parse_shapefile
+from parsers.txt_parser import parse_st102_facility
+from registry.loader import load_registry
 from transforms.bronze import transform_to_bronze, write_bronze
 from transforms.silver import build_all_silver_tables
-from validation.checks import validate_dataframe, write_validation_report
+from validation.checks import validate_dataframe
+
 
 # Lazy import for duckdb (may not be installed)
 def _import_duckdb():
@@ -81,7 +92,7 @@ def ingest(ingest_all: bool, dataset: str, cadence: str, force: bool, petrinex_m
     """Download and process datasets."""
     data_dir = get_data_dir()
     registry = load_registry()
-    
+
     targets = []
     if dataset:
         targets = [dataset]
@@ -134,21 +145,21 @@ def process_petrinex_ingestion(data_dir: Path, registry, months: int = 3, force:
     """Core logic for Petrinex ingestion (AB or SK)."""
     config = registry.get(dataset_id)
     province = getattr(config, 'province', 'AB')
-    
+
     # We will use our own download logic for Petrinex because it is date-based
     # Try fetching starting from 1 month ago (e.g. in Jan, try Dec and Nov)
     current_date = datetime.now().replace(day=1) - relativedelta(months=1)
-    
+
     downloaded_files = []
-    
+
     for i in range(months):
         target_date = current_date - relativedelta(months=i)
         date_str = target_date.strftime('%Y-%m')
         url = config.url.format(date=date_str)
-        
+
         # Log to click if running via CLI, else logger
         click.echo(f"Ingesting Petrinex {province}: {date_str}...")
-        
+
         try:
             # If bronze already exists for this month and we're not forcing, skip work.
             # This makes long backfills resumable and prevents reprocessing 5y repeatedly.
@@ -163,36 +174,57 @@ def process_petrinex_ingestion(data_dir: Path, registry, months: int = 3, force:
             raw_dir = data_dir / "raw" / config.id
             raw_dir.mkdir(parents=True, exist_ok=True)
             snapshot_path = raw_dir / f"{date_str}_petrinex_vol.zip"
-            
+
             if not snapshot_path.exists() or force:
-                r = requests.get(url)
+                r = _get_session().get(url, timeout=120)
                 if r.status_code == 200:
-                    with open(snapshot_path, 'wb') as f:
-                        f.write(r.content)
+                    import tempfile as _tempfile
+                    fd, tmp = _tempfile.mkstemp(dir=str(raw_dir), suffix='.tmp')
+                    try:
+                        os.write(fd, r.content)
+                        os.close(fd)
+                        os.replace(tmp, str(snapshot_path))
+                    except Exception:
+                        os.close(fd)
+                        os.unlink(tmp)
+                        raise
                 else:
                     click.echo(f"  [FAILED] Failed to download {date_str} (Status: {r.status_code})")
                     continue
 
-            
+
             # Load parser
             if config.parser:
-                import importlib
-                module_path, func_name = config.parser.rsplit('.', 1)
-                module = importlib.import_module(module_path)
-                parser_func = getattr(module, func_name)
+                parser_func = config.get_parser_func()
                 df = parser_func(snapshot_path)
             else:
                 from parsers.txt_parser import parse_txt_default
                 df = parse_txt_default(snapshot_path)
-            
+
             # Bronze transform
             from transforms.bronze import transform_to_bronze, write_bronze
             bronze_df = transform_to_bronze(df, config, snapshot_date=date_str)
             bronze_path = write_bronze(bronze_df, config, data_dir, snapshot_date=date_str)
-            
+
+            # Record successful ingestion
+            try:
+                ingestion_log = IngestionLog(data_dir)
+                import hashlib as _hl
+                file_hash = _hl.sha256(snapshot_path.read_bytes()).hexdigest()[:16]
+                ingestion_log.record(
+                    dataset_id=dataset_id,
+                    source_url=url,
+                    file_hash=file_hash,
+                    row_count=len(bronze_df),
+                    status="success",
+                    output_path=str(bronze_path),
+                )
+            except Exception:
+                pass  # Logging failure should not block ingestion
+
             click.echo(f"  [OK] Saved to bronze: {bronze_path.name}")
             downloaded_files.append(bronze_path)
-            
+
         except Exception as e:
             click.echo(f"  [FAILED] Error ingesting {date_str}: {e}")
             logger.error(f"Petrinex error for {date_str}", exc_info=True)
@@ -224,24 +256,21 @@ def ingest_single_dataset(
         return process_petrinex_ingestion(data_dir, registry, months=months, force=force, dataset_id='sk_petrinex_production')
 
     config = registry.get(dataset_id)
-    
+
     # Download
     with DatasetDownloader(data_dir, config) as downloader:
         raw_paths = downloader.download(force=force)
-    
+
     if not raw_paths:
         return False  # No updates
-    
+
     for raw_path in raw_paths:
         click.echo(f"  Parsing: {raw_path.name}")
-        
+
         # Parse using configured parser or format-based defaults
         if config.parser:
-            import importlib
             try:
-                module_path, func_name = config.parser.rsplit('.', 1)
-                module = importlib.import_module(module_path)
-                parser_func = getattr(module, func_name)
+                parser_func = config.get_parser_func()
                 df = parser_func(raw_path)
             except Exception as e:
                 logger.error(f"Failed to load/run parser {config.parser} for {raw_path.name}: {e}")
@@ -257,19 +286,23 @@ def ingest_single_dataset(
         else:
             logger.warning(f"No parser or format-based fallback for {dataset_id}")
             continue
-            
+
+        # Schema enforcement (warns on drift, does not block)
+        from config.schemas import validate_schema
+        validate_schema(df, dataset_id)
+
         # Validate
         report = validate_dataframe(df, config)
         if not report.passed:
             logger.warning(f"Validation failed for {raw_path.name}")
             # write_validation_report(report, data_dir)
-        
+
         # Transform to bronze
         bronze_df = transform_to_bronze(df, config)
-        
+
         # Free parsed dataframe memory
         del df
-        
+
         # If multi_file, use filename as suffix (without dates)
         suffix = ""
         if config.multi_file:
@@ -278,13 +311,29 @@ def ingest_single_dataset(
             if "_" in base_name:
                 base_name = base_name.split("_", 1)[1]
             suffix = f"_{base_name.split('.')[0]}"
-            
+
         write_bronze(bronze_df, config, data_dir, suffix=suffix)
-        
+
+        # Record successful ingestion
+        try:
+            ingestion_log = IngestionLog(data_dir)
+            import hashlib as _hl
+            file_hash = _hl.sha256(raw_path.read_bytes()).hexdigest()[:16]
+            ingestion_log.record(
+                dataset_id=dataset_id,
+                source_url=str(raw_path),
+                file_hash=file_hash,
+                row_count=len(bronze_df),
+                status="success",
+                output_path=str(data_dir / "bronze" / config.id),
+            )
+        except Exception:
+            pass  # Logging failure should not block ingestion
+
         # Free bronze dataframe and force garbage collection
         del bronze_df
         gc.collect()
-    
+
     return True
 
 
@@ -295,20 +344,20 @@ def validate_cmd(latest: bool, dataset: str):
     """Validate data quality."""
     data_dir = get_data_dir()
     registry = load_registry()
-    
+
     if dataset:
         config = registry.get(dataset)
         bronze_path = data_dir / "bronze" / dataset
         files = sorted(bronze_path.glob("*.parquet")) if bronze_path.exists() else []
-        
+
         if not files:
             click.echo(f"No bronze data for {dataset}")
             return
-        
+
         import pandas as pd
         df = pd.read_parquet(files[-1])
         report = validate_dataframe(df, config)
-        
+
         click.echo(f"\nValidation: {dataset}")
         click.echo(f"  Rows: {report.row_count:,}")
         click.echo(f"  Status: {'PASSED' if report.passed else 'FAILED'}")
@@ -316,22 +365,22 @@ def validate_cmd(latest: bool, dataset: str):
             status = '[OK]' if r.passed else '[ERROR]'
             click.echo(f"    {status} {r.check_name}: {r.message}")
 
-            
+
     elif latest:
         click.echo("Validating all latest snapshots...")
         for ds_id in registry.list_all():
             config = registry.get(ds_id)
             bronze_path = data_dir / "bronze" / ds_id
             files = sorted(bronze_path.glob("*.parquet")) if bronze_path.exists() else []
-            
+
             if not files:
                 click.echo(f"  [SKIP] {ds_id}: no data")
                 continue
-            
+
             import pandas as pd
             df = pd.read_parquet(files[-1])
             report = validate_dataframe(df, config)
-            
+
             status = '[OK]' if report.passed else '[ERROR]'
             click.echo(f"  {status} {ds_id}: {report.row_count:,} rows")
 
@@ -361,6 +410,8 @@ def build_duckdb_cmd():
         from pipeline_scoring import build_pipeline_scores
         build_pipeline_scores(db_path)
         click.echo("  [OK] Pipeline scores built")
+    except ImportError:
+        pass  # Optional module not installed
     except Exception as e:
         click.echo(f"  [WARN] Pipeline scoring failed: {e}")
 
@@ -376,29 +427,29 @@ def status():
     """Show pipeline status."""
     data_dir = get_data_dir()
     registry = load_registry()
-    
+
     click.echo("AER Data Pipeline Status\n")
     click.echo(f"Data directory: {data_dir}")
     click.echo(f"Datasets configured: {len(registry)}")
-    
+
     click.echo("\nDatasets:")
     for config in registry:
         # Check for data
         bronze_path = data_dir / "bronze" / config.id
         has_data = bronze_path.exists() and list(bronze_path.glob("*.parquet"))
-        
+
         status_icon = '[OK]' if has_data else '[SKIP]'
         click.echo(f"  {status_icon} {config.id}")
 
         click.echo(f"      Name: {config.name}")
         click.echo(f"      Cadence: {config.expected_cadence}")
         click.echo(f"      Format: {config.download_format}")
-        
+
         if has_data:
             files = sorted(bronze_path.glob("*.parquet"))
             latest = files[-1].name
             click.echo(f"      Latest: {latest}")
-    
+
     # DuckDB status
     db_path = data_dir.parent / "aer_data.duckdb"
     if db_path.exists():
@@ -411,25 +462,76 @@ def status():
         except ImportError:
             click.echo(f"\nDuckDB: {db_path} (install duckdb to see stats)")
     else:
-        click.echo(f"\nDuckDB: not built yet")
+        click.echo("\nDuckDB: not built yet")
 
 
 @cli.command()
-@click.option('--dataset', '-d', type=click.Choice(['st1', 'st49', 'st3', 'all']), default='all', 
+@click.option('--output', '-o', default='./export', help='Output directory')
+@click.option('--format', 'fmt', type=click.Choice(['parquet', 'csv']), default='parquet', help='Export format')
+@click.option('--table', '-t', help='Export a specific table (default: all)')
+def export(output: str, fmt: str, table: str):
+    """Export DuckDB tables to files for use in other tools."""
+    data_dir = get_data_dir()
+    db_path = data_dir.parent / "aer_data.duckdb"
+
+    if not db_path.exists():
+        click.echo("DuckDB not built yet. Run 'build-duckdb' first.")
+        return
+
+    import duckdb
+    output_dir = Path(output)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    conn = duckdb.connect(str(db_path), read_only=True)
+    try:
+        # Get tables to export
+        all_tables = conn.execute(
+            "SELECT table_name FROM information_schema.tables WHERE table_schema = 'main'"
+        ).fetchall()
+        table_names = [t[0] for t in all_tables]
+
+        if table:
+            if table not in table_names:
+                click.echo(f"Table '{table}' not found. Available: {', '.join(table_names)}")
+                return
+            table_names = [table]
+
+        click.echo(f"Exporting {len(table_names)} table(s) to {output_dir} as {fmt}...")
+
+        for tbl in table_names:
+            try:
+                out_path = output_dir / f"{tbl}.{fmt}"
+                if fmt == 'csv':
+                    conn.execute(f"COPY {tbl} TO '{out_path}' (HEADER, DELIMITER ',')")
+                else:
+                    conn.execute(f"COPY {tbl} TO '{out_path}' (FORMAT PARQUET)")
+                row_count = conn.execute(f"SELECT COUNT(*) FROM {tbl}").fetchone()[0]
+                click.echo(f"  [OK] {tbl}: {row_count:,} rows -> {out_path.name}")
+            except Exception as e:
+                click.echo(f"  [ERROR] {tbl}: {e}")
+
+    finally:
+        conn.close()
+
+    click.echo(f"\nExport complete: {output_dir}")
+
+
+@cli.command()
+@click.option('--dataset', '-d', type=click.Choice(['st1', 'st49', 'st3', 'all']), default='all',
               help='Which archive to backfill')
 def backfill_archives(dataset: str):
     """Backfill historical archives (10+ years).
-    
+
     Downloads and processes historical archives:
     - ST1: Well licences (2015-2025)
-    - ST49: Well spuds (2015-2025)  
+    - ST49: Well spuds (2015-2025)
     - ST3: Provincial production stats by product (2010-2024)
     """
     data_dir = get_data_dir()
     registry = load_registry()
-    
+
     archives_to_process = []
-    
+
     if dataset in ['st1', 'all']:
         try:
             config = registry.get('st1_well_licences_archive')
@@ -437,7 +539,7 @@ def backfill_archives(dataset: str):
             logger.info(f"Found ST1 archive config with {len(config.archive_urls)} URLs")
         except KeyError:
             logger.warning("st1_well_licences_archive not found in registry")
-    
+
     if dataset in ['st49', 'all']:
         try:
             config = registry.get('st49_spud_archive')
@@ -445,7 +547,7 @@ def backfill_archives(dataset: str):
             logger.info(f"Found ST49 archive config with {len(config.archive_urls)} URLs")
         except KeyError:
             logger.warning("st49_spud_archive not found in registry")
-    
+
     if dataset in ['st3', 'all']:
         try:
             config = registry.get('st3_provincial_stats_archive')
@@ -453,83 +555,79 @@ def backfill_archives(dataset: str):
             logger.info(f"Found ST3 archive config with {len(config.archive_urls)} URLs")
         except KeyError:
             logger.warning("st3_provincial_stats_archive not found in registry")
-    
+
     if not archives_to_process:
         click.echo("No archives to process")
         return
-    
+
     click.echo(f"Backfilling {len(archives_to_process)} archive dataset(s)...")
     click.echo("This may take several minutes - downloading 10 years of data.\n")
-    
+
     for dataset_id, config in archives_to_process:
         click.echo(f"\nProcessing {dataset_id}...")
         click.echo(f"  {len(config.archive_urls)} archive URLs to download")
-        
+
         # Process each archive URL one at a time to avoid memory issues
         total_rows = 0
         for i, url in enumerate(config.archive_urls):
             try:
                 click.echo(f"  [{i+1}/{len(config.archive_urls)}] Downloading {url.split('/')[-1]}...")
-                
+
                 # Download the file with browser-like headers to avoid 403
-                import tempfile
                 raw_dir = data_dir / "raw" / dataset_id
                 raw_dir.mkdir(parents=True, exist_ok=True)
-                
+
                 headers = {
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                    'User-Agent': 'AER-Data-Pipeline/1.0 (+https://github.com/QV2000/aer-data-pipeline)',
                     'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
                     'Accept-Language': 'en-US,en;q=0.5',
                     'Referer': 'https://www.aer.ca/',
                 }
-                
-                resp = requests.get(url, headers=headers, timeout=120)
+
+                resp = _get_session().get(url, headers=headers, timeout=120)
                 if resp.status_code != 200:
                     click.echo(f"    Skipped (HTTP {resp.status_code})")
                     continue
-                
+
                 # Save to temp file
                 filename = url.split('/')[-1]
                 temp_path = raw_dir / filename
                 temp_path.write_bytes(resp.content)
-                
+
                 # Parse
                 if config.parser:
-                    parser_module, parser_func = config.parser.rsplit('.', 1)
-                    import importlib
-                    module = importlib.import_module(parser_module)
-                    parser = getattr(module, parser_func)
-                    
+                    parser_func = config.get_parser_func()
+
                     try:
-                        df = parser(temp_path)
-                        
+                        df = parser_func(temp_path)
+
                         if df is not None and not df.empty:
                             # Extract date from filename for snapshot_date
                             import re
                             date_match = re.search(r'(\d{4}(?:-\d{2})?)', filename)
                             snapshot_date = date_match.group(1) if date_match else filename.replace('.zip', '')
-                            
+
                             bronze_df = transform_to_bronze(df, config, snapshot_date)
-                            output_path = write_bronze(bronze_df, config, data_dir, snapshot_date)
+                            write_bronze(bronze_df, config, data_dir, snapshot_date)
                             total_rows += len(df)
                             click.echo(f"    Saved {len(df):,} rows")
-                            
+
                             del df, bronze_df
                             gc.collect()
                     except Exception as e:
                         click.echo(f"    Parse error: {e}")
-                
+
                 # Clean up temp file
                 try:
                     temp_path.unlink()
-                except:
+                except Exception:
                     pass
-                    
+
             except Exception as e:
                 click.echo(f"    Error: {e}")
-        
+
         click.echo(f"  Total: {total_rows:,} rows for {dataset_id}")
-    
+
     click.echo("\nBackfill complete! Run 'build-duckdb' to update the database.")
 
 

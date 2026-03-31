@@ -8,10 +8,10 @@ Handles:
 - Active Disposal Wells
 """
 
-import pandas as pd
-from pathlib import Path
-from typing import Optional
 import logging
+from pathlib import Path
+
+import pandas as pd
 
 logger = logging.getLogger(__name__)
 
@@ -151,16 +151,16 @@ def parse_st2_drilling(file_path: Path) -> pd.DataFrame:
 def parse_well_facility_links(file_path: Path) -> pd.DataFrame:
     """
     Parse Well-to-Facility Links CSV from AER Catalogue #219.
-    
+
     Maps wells (UWI) to their linked facilities (batteries, plants, etc.)
     """
     logger.info(f"Parsing well-facility links from {file_path}")
-    
+
     df = pd.read_csv(file_path, encoding='utf-8-sig')
-    
+
     # Normalize column names
     df.columns = df.columns.str.lower().str.strip().str.replace(' ', '_')
-    
+
     column_mapping = {
         'well_id': 'uwi',
         'well_identifier': 'uwi',
@@ -177,13 +177,13 @@ def parse_well_facility_links(file_path: Path) -> pd.DataFrame:
         'operator_ba_id': 'operator_ba_id',
         'effective_date': 'effective_date',
     }
-    
+
     df = df.rename(columns={k: v for k, v in column_mapping.items() if k in df.columns})
-    
+
     # Parse date if present
     if 'effective_date' in df.columns:
         df['effective_date'] = pd.to_datetime(df['effective_date'], errors='coerce')
-    
+
     logger.info(f"Parsed {len(df)} well-facility link records")
     return df
 
@@ -202,8 +202,8 @@ def parse_petrinex_well_facility_link(file_path: Path) -> pd.DataFrame:
     - WellStatusFluid: CR-OIL, GAS, WATER, etc.
     - WellLegalSubdivision/Section/Township/Range/Meridian: DLS location
     """
-    import zipfile
     import io
+    import zipfile
 
     logger.info(f"Parsing Petrinex well-facility link from {file_path}")
 
@@ -314,7 +314,7 @@ def parse_petrinex_well_facility_link(file_path: Path) -> pd.DataFrame:
             mer = str(row.get('well_mer', '') or '').strip()
             if lsd and sec and twp and rng and mer:
                 return f"{lsd}-{sec}-{twp}-{rng}W{mer}"
-        except:
+        except Exception:
             pass
         return None
 
@@ -331,16 +331,16 @@ def parse_petrinex_well_facility_link(file_path: Path) -> pd.DataFrame:
 def parse_disposal_wells(file_path: Path) -> pd.DataFrame:
     """
     Parse Active Disposal Well List CSV from AER Catalogue #308.
-    
+
     Lists wells approved for injection/disposal with scheme details.
     """
     logger.info(f"Parsing disposal wells from {file_path}")
-    
+
     df = pd.read_csv(file_path, encoding='utf-8-sig')
-    
+
     # Normalize column names
     df.columns = df.columns.str.lower().str.strip().str.replace(' ', '_')
-    
+
     column_mapping = {
         'well_id': 'uwi',
         'well_identifier': 'uwi',
@@ -354,8 +354,8 @@ def parse_disposal_wells(file_path: Path) -> pd.DataFrame:
         'scheme_status': 'scheme_status',
         'status': 'scheme_status',
     }
-    
+
     df = df.rename(columns={k: v for k, v in column_mapping.items() if k in df.columns})
-    
+
     logger.info(f"Parsed {len(df)} disposal well records")
     return df

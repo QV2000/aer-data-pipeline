@@ -16,26 +16,26 @@ logger = logging.getLogger(__name__)
 def build_duckdb(data_dir: Path, db_path: Path = None) -> Path:
     """
     Build/refresh the DuckDB database.
-    
+
     Creates views for each silver table pointing to the Parquet files.
-    
+
     Args:
         data_dir: Base data directory
         db_path: Path to DuckDB file (default: data_dir/../aer_data.duckdb)
-        
+
     Returns:
         Path to created/updated DuckDB file
     """
     import gc
-    
+
     if db_path is None:
         db_path = data_dir.parent / "aer_data.duckdb"
-    
+
     silver_dir = data_dir / "silver"
-    
+
     if not silver_dir.exists():
         raise ValueError(f"Silver directory not found: {silver_dir}")
-    
+
     logger.info(f"Building DuckDB at: {db_path}")
 
     conn = duckdb.connect(str(db_path))
@@ -43,7 +43,7 @@ def build_duckdb(data_dir: Path, db_path: Path = None) -> Path:
     # Memory optimization - configurable via environment
     memory_limit = os.environ.get('DUCKDB_MEMORY_LIMIT', '2GB')
     conn.execute(f"SET memory_limit='{memory_limit}'")
-    
+
     try:
         for table_dir in silver_dir.iterdir():
             if not table_dir.is_dir():
@@ -63,7 +63,7 @@ def build_duckdb(data_dir: Path, db_path: Path = None) -> Path:
             if not parquet_glob:
                 logger.warning(f"No parquet data found for {table_name}")
                 continue
-            
+
             # Create or replace view
             # Using read_parquet for flexibility with schema changes
             if table_name == 'production':
@@ -95,9 +95,12 @@ def build_duckdb(data_dir: Path, db_path: Path = None) -> Path:
                 """
             conn.execute(query)
             logger.info(f"Created view '{table_name}'")
-        
+
         # Create some useful aggregate views
         _create_summary_views(conn)
+
+        # Create analyst-friendly aggregate views
+        _create_analyst_views(conn)
 
         # Import ST103 lookup tables (field and pool code mappings)
         _import_st103_lookups(conn, data_dir.parent)
@@ -106,25 +109,26 @@ def build_duckdb(data_dir: Path, db_path: Path = None) -> Path:
         _create_heavy_oil_views(conn)
 
         conn.commit()
-        
+
     finally:
         conn.close()
-    
+
     # Force garbage collection after heavy DB work
     gc.collect()
-    
+
     logger.info(f"DuckDB build complete: {db_path}")
     return db_path
 
 
 def _import_st103_lookups(conn: duckdb.DuckDBPyConnection, base_dir: Path):
     """Import AER ST103 Field and Pool lookup tables from Excel files."""
-    import pandas as pd
     import gc
-    
+
+    import pandas as pd
+
     field_list_path = base_dir / "FieldList.xlsx"
     field_pool_path = base_dir / "FieldPoolList.xlsx"
-    
+
     # Import field lookup
     if field_list_path.exists():
         try:
@@ -132,14 +136,14 @@ def _import_st103_lookups(conn: duckdb.DuckDBPyConnection, base_dir: Path):
             df.columns = [c.strip().lower().replace(' ', '_') for c in df.columns]
             conn.execute("DROP TABLE IF EXISTS field_lookup")
             conn.execute("CREATE TABLE field_lookup AS SELECT * FROM df")
-            logger.info(f"Created table 'field_lookup'")
+            logger.info("Created table 'field_lookup'")
             del df  # Free memory immediately
             gc.collect()
         except Exception as e:
             logger.warning(f"Failed to import FieldList.xlsx: {e}")
     else:
         logger.warning(f"FieldList.xlsx not found at {field_list_path}")
-    
+
     # Import field/pool lookup
     if field_pool_path.exists():
         try:
@@ -147,7 +151,7 @@ def _import_st103_lookups(conn: duckdb.DuckDBPyConnection, base_dir: Path):
             df.columns = [c.strip().lower().replace(' ', '_') for c in df.columns]
             conn.execute("DROP TABLE IF EXISTS field_pool_lookup")
             conn.execute("CREATE TABLE field_pool_lookup AS SELECT * FROM df")
-            logger.info(f"Created table 'field_pool_lookup'")
+            logger.info("Created table 'field_pool_lookup'")
             del df  # Free memory immediately
             gc.collect()
         except Exception as e:
@@ -185,11 +189,11 @@ def _create_summary_views(conn: duckdb.DuckDBPyConnection):
     # Check if facilities table exists
     try:
         conn.execute("SELECT 1 FROM facilities LIMIT 1")
-        
+
         # Facilities by operator
         conn.execute("""
             CREATE OR REPLACE VIEW facilities_by_operator AS
-            SELECT 
+            SELECT
                 operator_name,
                 COUNT(*) as facility_count,
                 SUM(CASE WHEN is_active THEN 1 ELSE 0 END) as active_count,
@@ -200,7 +204,7 @@ def _create_summary_views(conn: duckdb.DuckDBPyConnection):
             ORDER BY facility_count DESC
         """)
         logger.info("Created view 'facilities_by_operator'")
-        
+
     except Exception as e:
         logger.debug(f"Skipping facilities summary: {e}")
 
@@ -345,6 +349,128 @@ def _create_heavy_oil_views(conn: duckdb.DuckDBPyConnection):
     pass
 
 
+def _create_analyst_views(conn: duckdb.DuckDBPyConnection):
+    """Create pre-built views for common analyst queries."""
+
+    # v_latest_production: latest month's production per well
+    try:
+        conn.execute("""
+            CREATE OR REPLACE VIEW v_latest_production AS
+            SELECT p.*
+            FROM production p
+            WHERE p.productionmonth = (
+                SELECT MAX(productionmonth) FROM production
+            )
+        """)
+        logger.info("Created view 'v_latest_production'")
+    except Exception as e:
+        logger.debug(f"Skipping v_latest_production: {e}")
+
+    # v_well_summary: one row per well with current status and cumulative production
+    try:
+        conn.execute("""
+            CREATE OR REPLACE VIEW v_well_summary AS
+            SELECT
+                w.uwi,
+                w.name AS well_name,
+                w.licensee,
+                w.fluid,
+                w.mode,
+                w.province,
+                w.well_stat_code AS status_code,
+                COALESCE(p.total_oil, 0) AS cumulative_oil_m3,
+                COALESCE(p.total_gas, 0) AS cumulative_gas_e3m3,
+                COALESCE(p.total_water, 0) AS cumulative_water_m3,
+                p.first_prod_month,
+                p.last_prod_month,
+                p.producing_months
+            FROM wells w
+            LEFT JOIN (
+                SELECT
+                    uwi,
+                    SUM(oil_prod_vol) AS total_oil,
+                    SUM(gas_prod_vol) AS total_gas,
+                    SUM(water_prod_vol) AS total_water,
+                    MIN(productionmonth) AS first_prod_month,
+                    MAX(productionmonth) AS last_prod_month,
+                    COUNT(DISTINCT productionmonth) AS producing_months
+                FROM production
+                WHERE oil_prod_vol > 0 OR gas_prod_vol > 0
+                GROUP BY uwi
+            ) p ON w.uwi = p.uwi
+        """)
+        logger.info("Created view 'v_well_summary'")
+    except Exception as e:
+        logger.debug(f"Skipping v_well_summary: {e}")
+
+    # v_operator_scorecard: per-operator summary
+    try:
+        conn.execute("""
+            CREATE OR REPLACE VIEW v_operator_scorecard AS
+            SELECT
+                TRIM(w.licensee) AS operator_code,
+                COUNT(*) AS total_wells,
+                SUM(CASE WHEN w.mode != 'ABD' THEN 1 ELSE 0 END) AS active_wells,
+                SUM(CASE WHEN w.mode = 'ABD' THEN 1 ELSE 0 END) AS abandoned_wells,
+                SUM(CASE WHEN w.fluid LIKE 'CR%' THEN 1 ELSE 0 END) AS crude_wells,
+                SUM(CASE WHEN w.fluid = 'GAS' THEN 1 ELSE 0 END) AS gas_wells
+            FROM wells w
+            WHERE w.licensee IS NOT NULL AND TRIM(w.licensee) != ''
+            GROUP BY TRIM(w.licensee)
+        """)
+        logger.info("Created view 'v_operator_scorecard'")
+    except Exception as e:
+        logger.debug(f"Skipping v_operator_scorecard: {e}")
+
+    # v_monthly_provincial: provincial rollup by month
+    try:
+        conn.execute("""
+            CREATE OR REPLACE VIEW v_monthly_provincial AS
+            SELECT
+                province,
+                productionmonth,
+                COUNT(DISTINCT uwi) AS producing_wells,
+                SUM(oil_prod_vol) AS total_oil_m3,
+                SUM(gas_prod_vol) AS total_gas_e3m3,
+                SUM(water_prod_vol) AS total_water_m3
+            FROM production
+            WHERE oil_prod_vol > 0 OR gas_prod_vol > 0
+            GROUP BY province, productionmonth
+            ORDER BY province, productionmonth
+        """)
+        logger.info("Created view 'v_monthly_provincial'")
+    except Exception as e:
+        logger.debug(f"Skipping v_monthly_provincial: {e}")
+
+    # v_new_activity: combined view of recent licences, spuds, and status changes
+    try:
+        parts = []
+        for tbl, date_col, evt in [
+            ('well_licences', 'issue_date', 'licence'),
+            ('spud_activity', 'spud_date', 'spud'),
+            ('status_changes', 'event_date', 'status_change'),
+        ]:
+            try:
+                conn.execute(f"SELECT 1 FROM {tbl} LIMIT 1")
+                parts.append(
+                    f"SELECT uwi, '{evt}' AS event_type, "
+                    f"CAST({date_col} AS DATE) AS event_date "
+                    f"FROM {tbl} WHERE {date_col} IS NOT NULL"
+                )
+            except Exception:
+                pass
+
+        if parts:
+            union_sql = " UNION ALL ".join(parts)
+            conn.execute(f"""
+                CREATE OR REPLACE VIEW v_new_activity AS
+                {union_sql}
+            """)
+            logger.info("Created view 'v_new_activity'")
+    except Exception as e:
+        logger.debug(f"Skipping v_new_activity: {e}")
+
+
 def query_duckdb(db_path: Path, query: str):
     """Execute a query against the DuckDB database."""
     conn = duckdb.connect(str(db_path), read_only=True)
@@ -362,12 +488,12 @@ def get_table_stats(db_path: Path) -> dict:
         tables = conn.execute(
             "SELECT table_name FROM information_schema.tables WHERE table_schema = 'main'"
         ).fetchall()
-        
+
         stats = {}
         for (table_name,) in tables:
             count = conn.execute(f"SELECT COUNT(*) FROM {table_name}").fetchone()[0]
             stats[table_name] = count
-        
+
         return stats
     finally:
         conn.close()

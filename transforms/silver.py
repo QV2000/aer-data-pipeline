@@ -9,6 +9,7 @@ Silver layer contains curated, analysis-ready tables:
 """
 
 import logging
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional, Union
 
@@ -16,9 +17,20 @@ import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from registry.loader import DatasetConfig, SourceRegistry
+from registry.loader import SourceRegistry
 
 logger = logging.getLogger(__name__)
+
+
+def _warn_if_stale(parquet_path: Path, max_age_days: int = 90):
+    """Warn if a bronze parquet file is older than max_age_days."""
+    mtime = datetime.fromtimestamp(parquet_path.stat().st_mtime)
+    age = datetime.now() - mtime
+    if age > timedelta(days=max_age_days):
+        logger.warning(
+            f"STALE DATA: {parquet_path.name} is {age.days}d old. "
+            f"Source may have stopped publishing."
+        )
 
 
 def _trim_join_keys(df: pd.DataFrame, columns: list[str]) -> pd.DataFrame:
@@ -126,6 +138,7 @@ def build_facilities_table(
         active_files = sorted(active_path.glob("*.parquet")) if active_path.exists() else []
 
         if active_files:
+            _warn_if_stale(active_files[-1])
             df_active = pd.read_parquet(active_files[-1])
             df_active['is_active'] = True
             if 'province' not in df_active.columns:
@@ -142,6 +155,7 @@ def build_facilities_table(
         inactive_files = sorted(inactive_path.glob("*.parquet")) if inactive_path.exists() else []
 
         if inactive_files:
+            _warn_if_stale(inactive_files[-1])
             df_inactive = pd.read_parquet(inactive_files[-1])
             df_inactive['is_active'] = False
             if 'province' not in df_inactive.columns:
@@ -202,7 +216,7 @@ def build_facilities_table(
     if not dfs:
         logger.warning("No facility data found in bronze layer (AB or SK)")
         return pd.DataFrame()
-    
+
     # Combine metadata
     df_meta = pd.concat(dfs, ignore_index=True)
 
@@ -340,7 +354,7 @@ def build_facility_history_table(
     seen = seen.rename(columns={'min': 'first_seen', 'max': 'last_seen'})
 
     # Active date range
-    active_only = df_all[df_all['is_active'] == True]
+    active_only = df_all[df_all['is_active']]
     active_dates = active_only.groupby('facility_id')['_snapshot_date'].agg(['min', 'max']).reset_index()
     active_dates = active_dates.rename(columns={'min': 'first_active_date', 'max': 'last_active_date'})
 
@@ -447,10 +461,10 @@ def format_petrinex_uwi(raw_uwi: str) -> str:
     upper_uwi = raw_uwi.upper()
     if upper_uwi.startswith('ABWI') or upper_uwi.startswith('SKWI'):
         raw_uwi = raw_uwi[4:]
-    
+
     if len(raw_uwi) != 16:
         return raw_uwi
-    
+
     # Parse the 16-char identifier
     loc_exc = raw_uwi[0:3]   # e.g., "100" -> we want "00"
     lsd = raw_uwi[3:5]       # e.g., "01"
@@ -459,13 +473,13 @@ def format_petrinex_uwi(raw_uwi: str) -> str:
     rg = raw_uwi[10:12]      # e.g., "08"
     mer = raw_uwi[12:14]     # e.g., "W4"
     evt = raw_uwi[14:16]     # e.g., "02" -> we want "2"
-    
+
     # Match ST37 wells format:
     # - Location exception: take last 2 chars (drop leading type indicator)
     # - Event: convert to int to drop leading zeros, then back to string
     loc_fmt = loc_exc[-2:]  # "100" -> "00", "102" -> "02"
     evt_fmt = str(int(evt)) # "02" -> "2", "00" -> "0"
-    
+
     return f"{loc_fmt}/{lsd}-{sec}-{twp}-{rg}{mer}/{evt_fmt}"
 
 def _build_production_month_df(df: pd.DataFrame) -> pd.DataFrame:
@@ -498,9 +512,13 @@ def _build_production_month_df(df: pd.DataFrame) -> pd.DataFrame:
             break
 
     if dedupe_keys:
+        before_count = len(df)
         if '_snapshot_date' in df.columns:
             df = df.sort_values('_snapshot_date')
         df = df.drop_duplicates(subset=dedupe_keys, keep='last')
+        n_dupes = before_count - len(df)
+        if n_dupes > 0:
+            logger.info(f"Removed {n_dupes} duplicate rows from production month")
 
     # Pivot logic for Petrinex (where Activity/Product are rows)
     if 'activityid' in df.columns and 'productid' in df.columns:
@@ -654,8 +672,7 @@ def build_production_table(
     # Also write a small 'latest.parquet' for convenience (latest month only),
     # but DuckDB should read from parts/ to avoid duplication.
     try:
-        latest_file = max(files, key=lambda p: p.stem)
-        latest_month = latest_file.stem
+        latest_file = max((f for _, f in tagged_files), key=lambda p: p.stem)
         df_latest = pd.read_parquet(latest_file)
         df_latest_out = _build_production_month_df(df_latest)
         del df_latest
@@ -683,22 +700,23 @@ def build_pipelines_table(
     """
     if registry is None:
         registry = SourceRegistry()
-    
+
     config = registry.get('enhanced_pipeline_shapefile')
     bronze_path = data_dir / "bronze" / config.id
     # Look specifically for the lines file
     files = sorted(bronze_path.glob("*Pipelines_SHP.parquet")) if bronze_path.exists() else []
-    
+
     if not files:
         logger.warning("No pipeline lines data found in bronze layer")
         return pd.DataFrame()
-    
+
+    _warn_if_stale(files[-1])
     df = pd.read_parquet(files[-1])
-    
+
     # Clean up for silver
     df = df.drop(columns=['_snapshot_date', '_source_id'], errors='ignore')
     df['_silver_version'] = pd.Timestamp.now().isoformat()
-    
+
     logger.info(f"Built pipelines silver table: {len(df)} rows")
     return df
 
@@ -711,22 +729,22 @@ def build_pipeline_installations_table(
     """
     if registry is None:
         registry = SourceRegistry()
-    
+
     config = registry.get('enhanced_pipeline_shapefile')
     bronze_path = data_dir / "bronze" / config.id
     # Look specifically for the installations file
     files = sorted(bronze_path.glob("*Pipeline_Installations_SHP.parquet")) if bronze_path.exists() else []
-    
+
     if not files:
         logger.warning("No pipeline installations data found in bronze layer")
         return pd.DataFrame()
-    
+
     df = pd.read_parquet(files[-1])
-    
+
     # Clean up for silver
     df = df.drop(columns=['_snapshot_date', '_source_id'], errors='ignore')
     df['_silver_version'] = pd.Timestamp.now().isoformat()
-    
+
     logger.info(f"Built pipeline installations silver table: {len(df)} rows")
     return df
 
@@ -754,6 +772,7 @@ def build_sk_pipelines_table(
         logger.warning("No SK pipeline data found in bronze layer")
         return pd.DataFrame()
 
+    _warn_if_stale(files[-1])
     df = pd.read_parquet(files[-1])
 
     # Clean up for silver - standardize column names to match AB pipelines
@@ -786,29 +805,31 @@ def build_confidential_wells_table(
     """
     if registry is None:
         registry = SourceRegistry()
-    
+
     config = registry.get('confidential_well_list')
     bronze_path = data_dir / "bronze" / config.id
     files = sorted(bronze_path.glob("*.parquet")) if bronze_path.exists() else []
-    
+
     if not files:
         logger.warning("No confidential well data found in bronze layer")
         return pd.DataFrame()
-        
+
+    _warn_if_stale(files[-1])
+
     # Load all snapshots
     all_dfs = []
     for f in files:
         sdf = pd.read_parquet(f)
         sdf['_snapshot_date'] = f.stem  # Use filename (YYYY-MM-DD)
         all_dfs.append(sdf)
-        
+
     df = pd.concat(all_dfs, ignore_index=True)
-    
+
     # Sort by snapshot date to track latest status
     df = df.sort_values('_snapshot_date')
-    
+
     latest_snapshot = files[-1].stem
-    
+
     # Aggregate by UWI
     # We want: uwi, op_name, release_date, first_seen, last_seen, is_currently_confidential
     agg_df = df.groupby('uwi').agg({
@@ -816,14 +837,14 @@ def build_confidential_wells_table(
         'release_date': 'last',
         '_snapshot_date': ['min', 'max']
     }).reset_index()
-    
+
     # Flatten multi-index columns
     agg_df.columns = ['uwi', 'operator_name', 'release_date', 'first_seen', 'last_seen']
-    
+
     # is_currently_confidential if it appeared in the latest snapshot
     agg_df['is_currently_confidential'] = agg_df['last_seen'] == latest_snapshot
     agg_df['was_ever_confidential'] = True
-    
+
     agg_df['_silver_version'] = pd.Timestamp.now().isoformat()
     logger.info(f"Built cumulative confidential wells table: {len(agg_df)} rows")
     return agg_df
@@ -906,9 +927,13 @@ def build_spud_activity_table(
         df['province'] = 'AB'
 
     # Deduplicate: Keep the latest reported activity for each UWI + Spud Date + Province
+    before = len(df)
     if '_snapshot_date' in df.columns:
         df = df.sort_values('_snapshot_date', ascending=False)
     df = df.drop_duplicates(subset=['uwi', 'spud_date', 'province'], keep='first')
+    n_dupes = before - len(df)
+    if n_dupes > 0:
+        logger.info(f"Removed {n_dupes} duplicate rows from spud_activity")
 
     # TRIM all join keys to ensure reliable joins
     df = _trim_join_keys(df, ['uwi', 'licence_number', 'licensee_code', 'cwi'])
@@ -949,7 +974,7 @@ def build_licence_activity_table(
                 logger.warning(f"[DEBUG] Failed to read {f.name}: {e}")
     except KeyError as e:
         logger.warning(f"[DEBUG] st1_well_licences not in registry: {e}")
-    
+
     # Also load from archive (st1_well_licences_archive) for historical data - AB
     try:
         config = registry.get('st1_well_licences_archive')
@@ -1003,9 +1028,13 @@ def build_licence_activity_table(
         logger.info(f"[DEBUG] _snapshot_date range: {df['_snapshot_date'].min()} to {df['_snapshot_date'].max()}")
 
     # Deduplicate by licence number + province (licences can have same number across provinces)
+    before = len(df)
     if '_snapshot_date' in df.columns:
         df = df.sort_values('_snapshot_date', ascending=False)
     df = df.drop_duplicates(subset=['licence_number', 'province'], keep='first')
+    n_dupes = before - len(df)
+    if n_dupes > 0:
+        logger.info(f"Removed {n_dupes} duplicate rows from well_licences")
 
     # Debug: show issue_date range after dedup
     if 'issue_date' in df.columns:
@@ -1198,13 +1227,13 @@ def build_wells_table(
     for col in date_cols:
         if col in df.columns:
             df[col] = pd.to_datetime(df[col], format='%Y%m%d', errors='coerce')
-        
+
     # Enrich with confidential status
     conf_df = build_confidential_wells_table(data_dir, registry)
     if not conf_df.empty:
         df = df.merge(
-            conf_df[['uwi', 'was_ever_confidential', 'is_currently_confidential', 'release_date']], 
-            on='uwi', 
+            conf_df[['uwi', 'was_ever_confidential', 'is_currently_confidential', 'release_date']],
+            on='uwi',
             how='left'
         )
         df['was_ever_confidential'] = df['was_ever_confidential'].fillna(False)
@@ -1230,8 +1259,8 @@ def build_wells_table(
                 from domain.spatial import uwi_to_centroid
             except ImportError:
                 # Fallback: inline UWI to centroid conversion with latitude-adjusted longitude
-                import re
                 import math
+                import re
 
                 DLS_BASE = {
                     # Saskatchewan meridians
@@ -1314,17 +1343,17 @@ def build_wells_table(
             # Get the latest status change date per UWI
             latest_changes = status_changes.sort_values('event_date').groupby('uwi').last().reset_index()
             latest_changes = latest_changes[['uwi', 'event_date']].rename(columns={'event_date': 'stat_date'})
-            
+
             df = df.merge(latest_changes, on='uwi', how='left')
             dated_count = df['stat_date'].notna().sum()
             logger.info(f"Added stat_date to {dated_count}/{len(df)} wells from ST2 status changes")
     except Exception as e:
         logger.warning(f"Could not enrich wells with stat_date: {e}")
-    
+
     # Ensure stat_date column exists even if no data
     if 'stat_date' not in df.columns:
         df['stat_date'] = None
-    
+
     # TRIM all join keys to ensure reliable joins across datasets
     df = _trim_join_keys(df, ['uwi', 'licence', 'licensee', 'field_code', 'cwi'])
 
@@ -1343,17 +1372,17 @@ def _load_st2_status_changes(
     """Load all ST2 status change records from bronze."""
     if registry is None:
         registry = SourceRegistry()
-    
+
     try:
         config = registry.get('st2_weekly_status_changes')
         bronze_path = data_dir / "bronze" / config.id
         files = sorted(bronze_path.glob("*.parquet")) if bronze_path.exists() else []
     except KeyError:
         return pd.DataFrame()
-    
+
     if not files:
         return pd.DataFrame()
-    
+
     # Load all status change snapshots
     all_dfs = []
     for f in files:
@@ -1362,20 +1391,20 @@ def _load_st2_status_changes(
             all_dfs.append(sdf)
         except Exception as e:
             logger.warning(f"Error reading {f}: {e}")
-    
+
     if not all_dfs:
         return pd.DataFrame()
-    
+
     df = pd.concat(all_dfs, ignore_index=True)
-    
+
     # Ensure event_date is datetime
     if 'event_date' in df.columns:
         df['event_date'] = pd.to_datetime(df['event_date'], errors='coerce')
-    
+
     # Deduplicate by uwi + event_date
     if 'uwi' in df.columns and 'event_date' in df.columns:
         df = df.drop_duplicates(subset=['uwi', 'event_date'], keep='last')
-    
+
     return df
 
 
@@ -1432,7 +1461,7 @@ def build_status_changes_table(
         # Try to recover with alternative column names
         if 'status_change_date' in df.columns and 'event_date' not in df.columns:
             df['event_date'] = df['status_change_date']
-    
+
     # Skip coordinate enrichment in low-memory mode - causes OOM by reloading 657K wells
     # Enrichment can be done at query time via JOIN instead
     import os
@@ -1463,20 +1492,20 @@ def build_drilling_activity_table(
 ) -> pd.DataFrame:
     """
     Build the silver drilling_activity table from ST2 weekly drilling + ST49 spuds.
-    
+
     This is the PRIMARY source for "What Changed" new drilling activity detection.
     """
     if registry is None:
         registry = SourceRegistry()
-    
+
     all_dfs = []
-    
+
     # Load ST2 weekly drilling
     try:
         config = registry.get('st2_weekly_drilling')
         bronze_path = data_dir / "bronze" / config.id
         files = sorted(bronze_path.glob("*.parquet")) if bronze_path.exists() else []
-        
+
         for f in files:
             try:
                 sdf = pd.read_parquet(f)
@@ -1486,13 +1515,13 @@ def build_drilling_activity_table(
                 pass
     except KeyError:
         pass
-    
+
     # Load ST49 daily spuds
     try:
         config = registry.get('st49_daily_spud')
         bronze_path = data_dir / "bronze" / config.id
         files = sorted(bronze_path.glob("*.parquet")) if bronze_path.exists() else []
-        
+
         for f in files:
             try:
                 sdf = pd.read_parquet(f)
@@ -1506,14 +1535,14 @@ def build_drilling_activity_table(
                 pass
     except KeyError:
         pass
-    
+
     # Also load ST49 archive for historical spud data
     try:
         config = registry.get('st49_spud_archive')
         bronze_path = data_dir / "bronze" / config.id
         files = sorted(bronze_path.glob("*.parquet")) if bronze_path.exists() else []
         logger.info(f"Found {len(files)} spud archive files in {bronze_path}")
-        
+
         for f in files:
             try:
                 sdf = pd.read_parquet(f)
@@ -1527,22 +1556,22 @@ def build_drilling_activity_table(
                 pass
     except KeyError:
         pass
-    
+
     if not all_dfs:
         logger.warning("No drilling activity data found in bronze layer")
         return pd.DataFrame()
-    
+
     df = pd.concat(all_dfs, ignore_index=True)
-    
+
     # Ensure event_date is datetime
     if 'event_date' in df.columns:
         df['event_date'] = pd.to_datetime(df['event_date'], errors='coerce')
-    
+
     # Deduplicate
     if 'uwi' in df.columns and 'event_date' in df.columns:
         df = df.sort_values(['uwi', 'event_date', 'source'])
         df = df.drop_duplicates(subset=['uwi', 'event_date'], keep='last')
-    
+
     # Skip coordinate enrichment in low-memory mode - causes OOM
     import os
     if not os.path.exists('/data'):
@@ -1573,12 +1602,12 @@ def write_silver(
     """Write a silver table to Parquet."""
     silver_dir = data_dir / "silver" / table_name
     silver_dir.mkdir(parents=True, exist_ok=True)
-    
+
     output_path = silver_dir / "latest.parquet"
-    
+
     table = pa.Table.from_pandas(df)
     pq.write_table(table, output_path, compression='snappy')
-    
+
     logger.info(f"Wrote silver: {output_path} ({len(df)} rows)")
     return output_path
 
@@ -1586,9 +1615,9 @@ def write_silver(
 def build_all_silver_tables(data_dir: Path) -> dict[str, Path]:
     """Build all silver tables from bronze data."""
     import gc
-    
+
     results = {}
-    
+
     def safe_build(name: str, builder_func, *args, **kwargs):
         """Safely build a table, catching any errors."""
         try:
@@ -1608,7 +1637,7 @@ def build_all_silver_tables(data_dir: Path) -> dict[str, Path]:
                 gc.collect()
         except Exception as e:
             logger.error(f"Failed to build {name}: {e}")
-    
+
     # Check if memory-constrained (set LOW_MEMORY=1 to skip heavy tables)
     import os
     low_memory = os.environ.get('LOW_MEMORY', '') == '1'
@@ -1642,18 +1671,18 @@ def build_all_silver_tables(data_dir: Path) -> dict[str, Path]:
 
     if not low_memory:
         safe_build('ownership_changes', build_ownership_changes_table, data_dir)
-        
+
     # Activity - ST2 status changes and drilling (PRIMARY source for What Changed)
     safe_build('status_changes', build_status_changes_table, data_dir)
     safe_build('drilling_activity', build_drilling_activity_table, data_dir)
-    
+
     # Legacy activity tables (from ST49/ST1 snapshots)
     safe_build('spud_activity', build_spud_activity_table, data_dir)
     safe_build('well_licences', build_licence_activity_table, data_dir)
-    
+
     # Production
     safe_build('production', build_production_table, data_dir)
-    
+
     return results
 
 
@@ -1663,16 +1692,16 @@ def build_ownership_changes_table(
 ) -> pd.DataFrame:
     """
     Detect ownership changes by comparing consecutive ST37 well snapshots.
-    
+
     When a well's `well_name` changes between snapshots (e.g., "CNRL WELL X" -> "TENAZ WELL X"),
     this indicates an ownership transfer. This function tracks all such changes.
-    
+
     Returns:
         DataFrame with columns: uwi, old_well_name, new_well_name, change_date, old_operator, new_operator
     """
     if registry is None:
         registry = SourceRegistry()
-    
+
     try:
         config = registry.get('st37_wells_txt')
         bronze_path = data_dir / "bronze" / config.id
@@ -1680,53 +1709,53 @@ def build_ownership_changes_table(
     except KeyError:
         logger.warning("st37_wells_txt not found in registry")
         return pd.DataFrame()
-    
+
     if len(files) < 2:
         logger.info(f"Need at least 2 ST37 snapshots for ownership change detection, found {len(files)}")
         return pd.DataFrame()
-    
+
     logger.info(f"Comparing {len(files)} ST37 snapshots for ownership changes")
-    
+
     all_changes = []
-    
+
     for i in range(1, len(files)):
         prev_file = files[i-1]
         curr_file = files[i]
-        
+
         try:
             # Read only the columns we need to minimize memory
             prev_df = pd.read_parquet(prev_file, columns=['uwi', 'well_name'])
             curr_df = pd.read_parquet(curr_file, columns=['uwi', 'well_name'])
-            
+
             # Merge on UWI to compare
             merged = prev_df.merge(curr_df, on='uwi', suffixes=('_old', '_new'))
-            
+
             # Find rows where well_name changed
             changed = merged[merged['well_name_old'] != merged['well_name_new']].copy()
-            
+
             if not changed.empty:
                 changed['change_date'] = curr_file.stem  # e.g., "2026-01-15"
                 all_changes.append(changed)
                 logger.info(f"Found {len(changed)} ownership changes between {prev_file.stem} and {curr_file.stem}")
-            
+
             del prev_df, curr_df, merged
-            
+
         except Exception as e:
             logger.warning(f"Error comparing {prev_file.stem} to {curr_file.stem}: {e}")
-    
+
     if not all_changes:
         logger.info("No ownership changes detected across snapshots")
         return pd.DataFrame()
-    
+
     result = pd.concat(all_changes, ignore_index=True)
-    
+
     # Extract operator name (first word of well_name, usually the company abbreviation)
     def extract_operator(well_name):
         if pd.isna(well_name) or not well_name:
             return None
         parts = str(well_name).split()
         return parts[0] if parts else None
-    
+
     result['old_operator'] = result['well_name_old'].apply(extract_operator)
     result['new_operator'] = result['well_name_new'].apply(extract_operator)
 

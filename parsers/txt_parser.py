@@ -8,10 +8,10 @@ Handles various TXT formats:
 """
 
 import logging
-from pathlib import Path
-from typing import Optional, List, Tuple
-from io import StringIO, BytesIO
 import zipfile
+from io import BytesIO
+from pathlib import Path
+from typing import List, Tuple
 
 import pandas as pd
 
@@ -21,23 +21,23 @@ logger = logging.getLogger(__name__)
 def extract_lines_from_zip(file_path: Path) -> Tuple[List[str], int]:
     """
     Extract text lines from a ZIP file, handling nested ZIPs.
-    
+
     Some AER yearly archives contain nested ZIPs (e.g., dwll2024.zip contains
     dwll2024-01.zip, dwll2024-02.zip, etc.). This function handles both cases.
-    
+
     Returns:
         Tuple of (all_lines, file_count) where all_lines is the combined content
         from all TXT files found, and file_count is how many TXT files were processed.
     """
     all_lines = []
     file_count = 0
-    
+
     try:
         with zipfile.ZipFile(file_path, 'r') as zf:
             all_files = zf.namelist()
             txt_files = [n for n in all_files if n.lower().endswith('.txt')]
             nested_zips = [n for n in all_files if n.lower().endswith('.zip')]
-            
+
             # If we have TXT files directly, use them
             if txt_files:
                 target = txt_files[0]
@@ -46,7 +46,7 @@ def extract_lines_from_zip(file_path: Path) -> Tuple[List[str], int]:
                     content = f.read().decode('latin-1')
                     all_lines = content.split('\n')
                     file_count = 1
-            
+
             # If we have nested ZIPs, extract from each one
             elif nested_zips:
                 logger.info(f"Found {len(nested_zips)} nested ZIPs in {file_path}")
@@ -65,12 +65,12 @@ def extract_lines_from_zip(file_path: Path) -> Tuple[List[str], int]:
                     except Exception as e:
                         logger.warning(f"Failed to extract {inner_zip_name}: {e}")
                         continue
-                        
+
                 if file_count > 0:
                     logger.info(f"Extracted content from {file_count} nested ZIPs")
             else:
                 logger.warning(f"No TXT files or nested ZIPs found in {file_path}. Contents: {all_files[:10]}")
-                
+
     except zipfile.BadZipFile:
         # Check if file is actually HTML (error page)
         try:
@@ -80,70 +80,67 @@ def extract_lines_from_zip(file_path: Path) -> Tuple[List[str], int]:
                     logger.error(f"File is HTML error page, not ZIP: {file_path}")
                 else:
                     logger.error(f"Invalid ZIP file: {file_path}")
-        except:
+        except Exception:
             logger.error(f"Invalid ZIP file: {file_path}")
-            
+
     return all_lines, file_count
 
 
 def parse_st102_facility(file_path: Path, encoding: str = 'utf-8') -> pd.DataFrame:
     """
     Parse ST102 ActiveFacility.txt or InactiveFacility.txt
-    
+
     The ST102 format is often a report style with a 4-5 line header.
     It is typically tab-separated or whitespace-separated.
     """
     logger.info(f"Parsing ST102 facility file: {file_path}")
-    
+
     # Try different encodings
     for enc in [encoding, 'latin-1', 'cp1252']:
         try:
             # Detect header skip and delimiter
             with open(file_path, 'r', encoding=enc) as f:
                 lines = [f.readline() for _ in range(10)]
-            
+
             # Find the header row (typically starts with "Facility ID")
             header_idx = -1
             for i, line in enumerate(lines):
                 if "Facility ID" in line:
                     header_idx = i
                     break
-            
+
             if header_idx == -1:
-                # Fallback to standard pipe-delimited if no report header found
                 skiprows = 0
                 sep = '|' if '|' in lines[0] else ','
             else:
                 skiprows = header_idx
-                # Check for tabs vs multiple spaces
                 test_line = lines[header_idx]
                 sep = '\t' if '\t' in test_line else r'\s{2,}'
-            
-            # Read the file
-                df = pd.read_csv(
-                    file_path,
-                    sep=sep,
-                    skiprows=skiprows,
-                    encoding=enc,
-                    dtype=str,
-                    engine='python',  # Required for \s{2,} regex
-                    on_bad_lines='skip',
-                    quoting=3  # QUOTE_NONE
-                )
-            
+
+            df = pd.read_csv(
+                file_path,
+                sep=sep,
+                skiprows=skiprows,
+                encoding=enc,
+                dtype=str,
+                engine='python',
+                on_bad_lines='skip',
+                quoting=3
+            )
+
             # Normalize column names
             df.columns = [normalize_column_name(c) for c in df.columns]
-            
+
             # Filter out any lingering footer lines (e.g. "Total Rows: ...")
             if 'facility_id' in df.columns:
                 df = df[df['facility_id'].str.contains(r'[A-Z0-9]{5,}', na=False)]
-            
+
             logger.info(f"Parsed {len(df)} rows with columns: {list(df.columns)}")
             return df
-            
+
         except UnicodeDecodeError:
             continue
-    
+
     raise ValueError(f"Could not parse {file_path}")
 
 
@@ -154,12 +151,12 @@ def parse_st49_spud(file_path: Path, encoding: str = 'utf-8') -> pd.DataFrame:
     Supports both direct TXT files and ZIP archives (including nested ZIPs).
     """
     logger.info(f"Parsing ST49 spud file: {file_path}")
-    
+
     import re
-    
+
     uwi_pattern = re.compile(r'(\d{2}/\d{2}-\d{2}-\d{3}-\d{2}W\d/\d)')
     licence_pattern = re.compile(r'(\d{7})')
-    
+
     # Handle ZIP archives (including nested ZIPs)
     if Path(file_path).suffix.lower() == '.zip':
         lines, file_count = extract_lines_from_zip(file_path)
@@ -168,7 +165,7 @@ def parse_st49_spud(file_path: Path, encoding: str = 'utf-8') -> pd.DataFrame:
     else:
         with open(file_path, 'r', encoding='latin-1') as f:
             lines = f.readlines()
-    
+
     data = []
     for i, line in enumerate(lines):
         # Look for UWI
@@ -178,15 +175,15 @@ def parse_st49_spud(file_path: Path, encoding: str = 'utf-8') -> pd.DataFrame:
             # Licence is often on the same line after the well name
             lic_match = licence_pattern.search(line[40:])
             licence = lic_match.group(1) if lic_match else None
-            
+
             # Well name is between UWI and Licence
             well_name = line[match.end():].split(licence or '      ')[0].strip() if licence else line[match.end():].strip()
-            
+
             # Look at next lines for more info if needed
             contractor = ""
             if i + 1 < len(lines) and "CONTRACTOR" not in lines[i+1]:
                  contractor = lines[i+1].strip() if isinstance(lines[i+1], str) else lines[i+1]
-                 
+
             data.append({
                 'uwi': uwi,
                 'well_name': well_name,
@@ -194,11 +191,11 @@ def parse_st49_spud(file_path: Path, encoding: str = 'utf-8') -> pd.DataFrame:
                 'drilling_contractor': contractor,
                 '_raw_line': line.strip() if isinstance(line, str) else line
             })
-            
+
     df = pd.DataFrame(data)
     if not df.empty:
         df['spud_date'] = pd.Timestamp.now().strftime('%Y-%m-%d') # Fallback to file date ideally
-        
+
     logger.info(f"Parsed {len(df)} spud records from report")
     return df
 
@@ -344,8 +341,8 @@ def parse_st37_wells(file_path: Path, encoding: str = 'utf-8') -> pd.DataFrame:
     """
     logger.info(f"Parsing ST37 wells file: {file_path}")
 
-    import zipfile
     import io
+    import zipfile
 
     if file_path.suffix.lower() == '.zip':
         with zipfile.ZipFile(file_path, 'r') as zf:
@@ -378,6 +375,15 @@ def parse_st37_wells(file_path: Path, encoding: str = 'utf-8') -> pd.DataFrame:
             quoting=3,  # QUOTE_NONE
             dtype=str
         )
+
+    # Check if first row is a header row (some ST37 versions include headers)
+    if len(df) > 0:
+        first_val = str(df.iloc[0, 0]).strip().upper()
+        if first_val in ('UWI', 'UWI_DISPLAY_FORMAT', 'UWID'):
+            df.columns = [normalize_column_name(str(c)) for c in df.iloc[0]]
+            df = df.iloc[1:].reset_index(drop=True)
+            logger.info("ST37: detected header row, using dynamic columns")
+            return df
 
     # ST37 column names based on actual AER file structure
     st37_columns = [
@@ -424,11 +430,11 @@ def parse_petrinex_production(file_path: Path) -> pd.DataFrame:
     Parse Petrinex Conventional Volumetric Data CSV.
     Note: The file can be a double-zipped CSV.
     """
-    import zipfile
     import io
-    
+    import zipfile
+
     logger.info(f"Parsing Petrinex production file: {file_path}")
-    
+
     def extract_from_zip(path):
         with zipfile.ZipFile(path) as z:
             # Check for inner zips (Petrinex style)
@@ -454,7 +460,7 @@ def parse_petrinex_production(file_path: Path) -> pd.DataFrame:
             raise
     else:
         df = pd.read_csv(file_path, dtype=str)
-        
+
     # Standardize column names
     # Petrinex CSV commonly includes:
     # - ProductionMonth, ActivityID, ProductID, Volume, Energy, Hours, FromToIDIdentifier, ...
@@ -474,7 +480,7 @@ def parse_petrinex_production(file_path: Path) -> pd.DataFrame:
     if 'hours' in df.columns and 'hours_on' not in df.columns:
         rename_cols['hours'] = 'hours_on'
     df = df.rename(columns=rename_cols)
-    
+
     # Attempt to find UWI (often in 'well' or 'facility_id' if type is WI/WP)
     if 'well' in df.columns:
         df = df.rename(columns={'well': 'uwi'})
@@ -484,7 +490,7 @@ def parse_petrinex_production(file_path: Path) -> pd.DataFrame:
         uwi_pattern = re.compile(r'\d{2}/\d{2}-\d{2}-\d{3}-\d{2}W\d/\d')
         if df['facility_id'].astype(str).str.contains(uwi_pattern, na=False).any():
             df = df.rename(columns={'facility_id': 'uwi'})
-            
+
     logger.info(f"Parsed {len(df)} Petrinex production rows")
     return df
 
@@ -492,12 +498,12 @@ def parse_petrinex_production(file_path: Path) -> pd.DataFrame:
 def parse_general_well_data(file_path: Path, encoding: str = 'utf-8') -> pd.DataFrame:
     """
     Parse General Well Data File - All Alberta.
-    
+
     This is a large bulk file with well reference data.
     Uses chunked reading for memory efficiency.
     """
     logger.info(f"Parsing General Well Data file: {file_path}")
-    
+
     # Check if ZIP
     if file_path.suffix.lower() == '.zip':
         import zipfile
@@ -505,7 +511,7 @@ def parse_general_well_data(file_path: Path, encoding: str = 'utf-8') -> pd.Data
             txt_files = [n for n in zf.namelist() if n.lower().endswith('.txt')]
             if not txt_files:
                 raise ValueError(f"No TXT file found in {file_path}")
-            
+
             with zf.open(txt_files[0]) as f:
                 # Read in chunks for large files
                 chunks = []
@@ -527,9 +533,9 @@ def parse_general_well_data(file_path: Path, encoding: str = 'utf-8') -> pd.Data
             dtype=str,
             on_bad_lines='skip'
         )
-    
+
     df.columns = [normalize_column_name(c) for c in df.columns]
-    
+
     logger.info(f"Parsed {len(df)} well records")
     return df
 
@@ -537,19 +543,19 @@ def parse_general_well_data(file_path: Path, encoding: str = 'utf-8') -> pd.Data
 def parse_well_production(file_path: Path, encoding: str = 'utf-8') -> pd.DataFrame:
     """
     Parse Well Production Data File - All Alberta.
-    
+
     This is a very large time-series file with monthly production data.
     Uses streaming/chunked processing.
     """
     logger.info(f"Parsing Well Production file: {file_path}")
-    
+
     if file_path.suffix.lower() == '.zip':
         import zipfile
         with zipfile.ZipFile(file_path, 'r') as zf:
             txt_files = [n for n in zf.namelist() if n.lower().endswith('.txt')]
             if not txt_files:
                 raise ValueError(f"No TXT file found in {file_path}")
-            
+
             with zf.open(txt_files[0]) as f:
                 chunks = []
                 for chunk in pd.read_csv(
@@ -570,9 +576,9 @@ def parse_well_production(file_path: Path, encoding: str = 'utf-8') -> pd.DataFr
             dtype=str,
             on_bad_lines='skip'
         )
-    
+
     df.columns = [normalize_column_name(c) for c in df.columns]
-    
+
     logger.info(f"Parsed {len(df)} production records")
     return df
 
@@ -580,32 +586,32 @@ def parse_well_production(file_path: Path, encoding: str = 'utf-8') -> pd.DataFr
 def normalize_column_name(name: str) -> str:
     """
     Normalize column names to snake_case.
-    
+
     Examples:
         "Facility ID" -> "facility_id"
         "Operator Name" -> "operator_name"
         "UWI" -> "uwi"
     """
     import re
-    
+
     # Strip whitespace
     name = str(name).strip()
-    
+
     # Replace spaces and special chars with underscore
     name = re.sub(r'[\s\-\/\.\(\)]+', '_', name)
-    
+
     # Convert camelCase to snake_case
     name = re.sub(r'([a-z])([A-Z])', r'\1_\2', name)
-    
+
     # Lowercase
     name = name.lower()
-    
+
     # Remove duplicate underscores
     name = re.sub(r'_+', '_', name)
-    
+
     # Remove leading/trailing underscores
     name = name.strip('_')
-    
+
     return name
 
 
@@ -615,7 +621,7 @@ def parse_confidential_well_list(file_path: Path) -> pd.DataFrame:
     Fixed-width format with specific columns.
     """
     logger.info(f"Parsing confidential well list: {file_path}")
-    
+
     # Define columns based on inspection
     # Positions are approximate/generous to capture full values
     colspecs = [
@@ -627,41 +633,41 @@ def parse_confidential_well_list(file_path: Path) -> pd.DataFrame:
         (110, 130) # release_date
     ]
     names = ['uwi', 'licence', 'op_code', 'op_name', 'conf_type', 'release_date']
-    
+
     # Read as FWF
     try:
         df = pd.read_fwf(file_path, colspecs=colspecs, names=names, dtype=str)
     except Exception as e:
         logger.error(f"Failed to read FWF confidential list: {e}")
         return pd.DataFrame()
-        
+
     if df.empty:
         return df
-        
+
     # Clean up
     df = df[~df['uwi'].isna()].copy()
-    
+
     # Strip whitespace from all columns and uppercase UWI
     for col in df.columns:
         df[col] = df[col].astype(str).str.strip()
-    
+
     if 'uwi' in df.columns:
         df['uwi'] = df['uwi'].str.upper()
 
-        
+
     # Filter out header/decorative lines
     # Usually headers like "DIE - INT01", "Confidential Well List", "===" or "UWI"
     df = df[~df['uwi'].str.startswith(('---', '===', 'UWI', 'DIE', 'Page', 'Confidential'))].copy()
-    
+
     # Valid UWIs should be roughly 19 characters for this format (00/01-01-001-01W1/0)
     df = df[df['uwi'].str.len() >= 10].copy()
-    
+
     # Handle 'no date avail' and formatting
     if 'release_date' in df.columns:
         df['release_date'] = df['release_date'].replace('no date avail', None)
         # Attempt date parsing (format usually MM/DD/YYYY or similar in these reports)
         df['release_date_parsed'] = pd.to_datetime(df['release_date'], errors='coerce')
-        
+
     logger.info(f"Parsed {len(df)} confidential wells")
     return df
 
