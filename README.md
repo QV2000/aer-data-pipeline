@@ -2,7 +2,7 @@
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 
-> **Just want the data?** Download pre-built DuckDB and Parquet files from the [Releases page](https://github.com/QV2000/aer-data-pipeline/releases). No code required.
+> **Pre-built data coming soon.** We will publish ready-to-download DuckDB and Parquet files on the [Releases page](https://github.com/QV2000/aer-data-pipeline/releases). For now, run the pipeline yourself (takes about 10 minutes).
 
 # AER Data Pipeline
 
