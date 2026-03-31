@@ -8,16 +8,40 @@ Open-source pipeline for ingesting Alberta and Saskatchewan oil & gas public dat
 
 Run the pipeline and get a single DuckDB database with:
 
-| Table | Source | Records | Update Cadence |
-|-------|--------|---------|----------------|
-| `wells` / `well_attributes` | AER ST37 | ~820K wells | Monthly |
-| `production` | Petrinex AB + SK | ~3.5M rows (5 years) | Monthly |
-| `facilities` | AER ST102 | ~120K facilities | Monthly |
-| `well_licences` | AER ST1 | Daily licences issued | Daily |
-| `spud_activity` | AER ST49 | Daily spud reports | Daily |
-| `status_changes` | AER ST2 | Weekly well status changes | Weekly |
-| `sk_pipelines` | SK GeoHub | ~5K pipeline segments | Monthly |
-| `pipelines` | AER Spatial Data | ~500K pipeline segments | Monthly |
+### Alberta
+
+| Table | Source | Description | Cadence |
+|-------|--------|-------------|---------|
+| `wells` / `well_attributes` | AER ST37 | ~820K wells with UWI, licensee, status, fluid, depth, coordinates | Monthly |
+| `production` | Petrinex AB | ~3M+ rows of oil/gas/water volumes per well (last 5 years) | Monthly |
+| `facilities` | AER ST102 | ~120K batteries, gas plants, meter stations (active + inactive) | Monthly |
+| `facilities` (shapefile) | AER ST102 | Geocoded facility locations | Monthly |
+| `well_licences` | AER ST1 | Daily well licences issued (rolling 7-day + 10yr archive) | Daily |
+| `spud_activity` | AER ST49 | Daily spud reports (rolling 7-day + 10yr archive) | Daily |
+| `status_changes` | AER ST2 | Weekly well status changes (drilling, completed, suspended, abandoned) | Weekly |
+| `drilling_activity` | AER ST2 | Weekly drilling activity report | Weekly |
+| `pipelines` | AER Spatial Data | ~500K pipeline segments with substance, status, operator | Monthly |
+| `confidential_wells` | AER | Daily list of wells with confidential status | Daily |
+| `abandoned_wells` | AER Spatial Data | Geocoded abandoned/decommissioned wells | Monthly |
+| `scheme_approvals` | AER | Injection and disposal scheme approval locations | Monthly |
+| `well_facility_link` | Petrinex AB | Maps each well to its linked facility (battery) | Monthly |
+| `st3_provincial_stats` | AER ST3 | Provincial production stats by product (oil/gas/NGL/butane/ethane/propane, 2010-present) | Monthly |
+
+### Saskatchewan
+
+| Table | Source | Description | Cadence |
+|-------|--------|-------------|---------|
+| `production` | Petrinex SK | SK well production volumes (oil/gas/water) | Monthly |
+| `sk_pipelines` | SK GeoHub ArcGIS | ~5K pipeline segments with licence, owner, substance | Monthly |
+| `sk_well_infrastructure` | Petrinex SK | Well infrastructure data | Daily |
+| `sk_well_licence` | Petrinex SK | Well licence data | Daily |
+| `sk_facility_licence` | Petrinex SK | Facility licence data | Daily |
+| `sk_facility_infrastructure` | Petrinex SK | Facility infrastructure data | Daily |
+| `sk_well_facility_link` | Petrinex SK | Well-to-facility linkage | Daily |
+| `sk_business_associate` | Petrinex SK | Operator/company lookup | Daily |
+| `sk_daily_drilling` | SK Gov | Daily drilling activity (spuds/rig releases) | Daily |
+| `sk_well_bulletin` | SK Gov | Daily well bulletin (licences + status changes) | Daily |
+| `sk_ref_*` | Petrinex SK | Reference tables: BA identifiers, facility IDs, activity codes, pool codes, product codes | Daily |
 
 All data is public and sourced directly from government websites. No scraping of private or paywalled sources.
 
