@@ -209,6 +209,28 @@ def _create_summary_views(conn: duckdb.DuckDBPyConnection):
         logger.debug(f"Skipping facilities summary: {e}")
 
 
+def _detect_wells_columns(conn: duckdb.DuckDBPyConnection) -> tuple[str, str]:
+    """Detect licensee/name column names on the 'wells' view.
+
+    The 'wells' parquet uses 'licensee'/'name'; when it fails to write the
+    alias view falls back to 'well_attributes' which uses
+    'licensee_code'/'well_name'. Returns (licensee_col, name_col).
+    """
+    try:
+        conn.execute("SELECT licensee FROM wells LIMIT 1")
+        licensee_col = "licensee"
+    except Exception:
+        licensee_col = "licensee_code"
+
+    try:
+        conn.execute("SELECT name FROM wells LIMIT 1")
+        name_col = "name"
+    except Exception:
+        name_col = "well_name"
+
+    return licensee_col, name_col
+
+
 def _create_operator_views(conn: duckdb.DuckDBPyConnection):
     """
     Create operator normalization and grouping views.
@@ -282,18 +304,22 @@ def _create_operator_views(conn: duckdb.DuckDBPyConnection):
     # 3. Create operator_groups view that groups by normalized name
     # Uses just the FIRST WORD of well name as the operator name
     # This is the main view used by the API
-    conn.execute("""
+    # Detect column name: 'wells' parquet has 'licensee'/'name';
+    # 'well_attributes' fallback alias has 'licensee_code'/'well_name'.
+    licensee_col, name_col = _detect_wells_columns(conn)
+
+    conn.execute(f"""
         CREATE OR REPLACE VIEW operator_groups AS
         WITH ba_code_stats AS (
             -- Get the most common first word for each BA code
             SELECT
-                TRIM(licensee) as ba_code,
-                UPPER(TRIM(SPLIT_PART(name, ' ', 1))) as operator_name,
+                TRIM({licensee_col}) as ba_code,
+                UPPER(TRIM(SPLIT_PART({name_col}, ' ', 1))) as operator_name,
                 COUNT(*) as well_count
             FROM wells
-            WHERE licensee IS NOT NULL AND TRIM(licensee) != ''
-                AND name IS NOT NULL AND TRIM(name) != ''
-            GROUP BY TRIM(licensee), UPPER(TRIM(SPLIT_PART(name, ' ', 1)))
+            WHERE {licensee_col} IS NOT NULL AND TRIM({licensee_col}) != ''
+                AND {name_col} IS NOT NULL AND TRIM({name_col}) != ''
+            GROUP BY TRIM({licensee_col}), UPPER(TRIM(SPLIT_PART({name_col}, ' ', 1)))
         ),
         primary_names AS (
             -- Pick the most common name for each BA code
@@ -368,12 +394,17 @@ def _create_analyst_views(conn: duckdb.DuckDBPyConnection):
 
     # v_well_summary: one row per well with current status and cumulative production
     try:
-        conn.execute("""
+        licensee_col, name_col = _detect_wells_columns(conn)
+    except Exception:
+        licensee_col, name_col = "licensee", "name"
+
+    try:
+        conn.execute(f"""
             CREATE OR REPLACE VIEW v_well_summary AS
             SELECT
                 w.uwi,
-                w.name AS well_name,
-                w.licensee,
+                w.{name_col} AS well_name,
+                w.{licensee_col} AS licensee,
                 w.fluid,
                 w.mode,
                 w.province,
@@ -405,18 +436,18 @@ def _create_analyst_views(conn: duckdb.DuckDBPyConnection):
 
     # v_operator_scorecard: per-operator summary
     try:
-        conn.execute("""
+        conn.execute(f"""
             CREATE OR REPLACE VIEW v_operator_scorecard AS
             SELECT
-                TRIM(w.licensee) AS operator_code,
+                TRIM(w.{licensee_col}) AS operator_code,
                 COUNT(*) AS total_wells,
                 SUM(CASE WHEN w.mode != 'ABD' THEN 1 ELSE 0 END) AS active_wells,
                 SUM(CASE WHEN w.mode = 'ABD' THEN 1 ELSE 0 END) AS abandoned_wells,
                 SUM(CASE WHEN w.fluid LIKE 'CR%' THEN 1 ELSE 0 END) AS crude_wells,
                 SUM(CASE WHEN w.fluid = 'GAS' THEN 1 ELSE 0 END) AS gas_wells
             FROM wells w
-            WHERE w.licensee IS NOT NULL AND TRIM(w.licensee) != ''
-            GROUP BY TRIM(w.licensee)
+            WHERE w.{licensee_col} IS NOT NULL AND TRIM(w.{licensee_col}) != ''
+            GROUP BY TRIM(w.{licensee_col})
         """)
         logger.info("Created view 'v_operator_scorecard'")
     except Exception as e:
