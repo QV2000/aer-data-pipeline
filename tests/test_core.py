@@ -104,6 +104,24 @@ def test_dataset_config_link_regex():
     assert config.link_regex is not None
 
 
+def test_filter_archive_targets_skips_archive_list():
+    from cli import filter_archive_targets
+    from registry.loader import load_registry
+
+    reg = load_registry()
+    targets = [
+        "st37_wells_txt",
+        "st1_well_licences_archive",
+        "st49_spud_archive",
+        "petrinex_production",
+    ]
+
+    kept, skipped = filter_archive_targets(targets, reg)
+
+    assert kept == ["st37_wells_txt", "petrinex_production"]
+    assert skipped == ["st1_well_licences_archive", "st49_spud_archive"]
+
+
 def test_validation_required_columns():
     import pandas as pd
 

@@ -89,7 +89,19 @@ def cli():
     show_default=True,
     help="For petrinex_production only: number of months to ingest (going backwards from last month). Use 60 for ~5 years backfill.",
 )
-def ingest(ingest_all: bool, dataset: str, cadence: str, force: bool, petrinex_months: int):
+@click.option(
+    '--include-archives',
+    is_flag=True,
+    help='Include historical archive_list datasets in bulk ingest modes.',
+)
+def ingest(
+    ingest_all: bool,
+    dataset: str,
+    cadence: str,
+    force: bool,
+    petrinex_months: int,
+    include_archives: bool,
+):
     """Download and process datasets."""
     data_dir = get_data_dir()
     registry = load_registry()
@@ -111,6 +123,15 @@ def ingest(ingest_all: bool, dataset: str, cadence: str, force: bool, petrinex_m
             click.echo(f"  {ds_id} ({config.expected_cadence}): {config.name}")
         return
 
+    if not dataset and not include_archives:
+        targets, skipped_archives = filter_archive_targets(targets, registry)
+        if skipped_archives:
+            click.echo(
+                "Skipping historical archive datasets in bulk ingest: "
+                + ", ".join(skipped_archives)
+            )
+            click.echo("Use backfill-archives or --include-archives to rebuild archives.")
+
     for ds_id in targets:
         try:
             click.echo(f"\n[INFO] Processing {ds_id}...")
@@ -130,6 +151,19 @@ def ingest(ingest_all: bool, dataset: str, cadence: str, force: bool, petrinex_m
         finally:
             # Force garbage collection between datasets to free memory
             gc.collect()
+
+
+def filter_archive_targets(targets: list[str], registry) -> tuple[list[str], list[str]]:
+    """Remove archive_list datasets from bulk ingest target lists."""
+    kept = []
+    skipped = []
+    for ds_id in targets:
+        config = registry.get(ds_id)
+        if config.source_type == 'archive_list':
+            skipped.append(ds_id)
+        else:
+            kept.append(ds_id)
+    return kept, skipped
 
 
 @cli.command('ingest-petrinex')
