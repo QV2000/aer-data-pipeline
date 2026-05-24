@@ -209,25 +209,52 @@ def _create_summary_views(conn: duckdb.DuckDBPyConnection):
         logger.debug(f"Skipping facilities summary: {e}")
 
 
-def _detect_wells_columns(conn: duckdb.DuckDBPyConnection) -> tuple[str, str]:
+def _get_table_columns(conn: duckdb.DuckDBPyConnection, table_name: str) -> set[str]:
+    """Return column names for a DuckDB table or view."""
+    return {row[1] for row in conn.execute(f"PRAGMA table_info('{table_name}')").fetchall()}
+
+
+def _first_existing_column(columns: set[str], candidates: list[str]) -> str | None:
+    for candidate in candidates:
+        if candidate in columns:
+            return candidate
+    return None
+
+
+def _quote_identifier(identifier: str) -> str:
+    return '"' + identifier.replace('"', '""') + '"'
+
+
+def _qualified_column(column: str, table_alias: str | None = None) -> str:
+    quoted = _quote_identifier(column)
+    if table_alias:
+        return f"{table_alias}.{quoted}"
+    return quoted
+
+
+def _nullable_column_expr(column: str | None, table_alias: str | None = None) -> str:
+    if column:
+        return _qualified_column(column, table_alias)
+    return "CAST(NULL AS VARCHAR)"
+
+
+def _detect_wells_columns(conn: duckdb.DuckDBPyConnection) -> tuple[str | None, str | None]:
     """Detect licensee/name column names on the 'wells' view.
 
-    The 'wells' parquet uses 'licensee'/'name'; when it fails to write the
-    alias view falls back to 'well_attributes' which uses
-    'licensee_code'/'well_name'. Returns (licensee_col, name_col).
+    The normal wells parquet uses 'licensee'/'name'. The fallback
+    well_attributes alias uses 'licensee_code'/'well_name'. Some SK-only runs
+    produce a smaller wells schema with no well-name column at all, so callers
+    must handle a None name column.
     """
-    try:
-        conn.execute("SELECT licensee FROM wells LIMIT 1")
-        licensee_col = "licensee"
-    except Exception:
-        licensee_col = "licensee_code"
-
-    try:
-        conn.execute("SELECT name FROM wells LIMIT 1")
-        name_col = "name"
-    except Exception:
-        name_col = "well_name"
-
+    columns = _get_table_columns(conn, "wells")
+    licensee_col = _first_existing_column(
+        columns,
+        ["licensee", "licensee_code", "operator_code", "operator_ba_id", "licensee_baid"],
+    )
+    name_col = _first_existing_column(
+        columns,
+        ["name", "well_name", "operator_name", "licensee_name", "licensee_address"],
+    )
     return licensee_col, name_col
 
 
@@ -304,22 +331,29 @@ def _create_operator_views(conn: duckdb.DuckDBPyConnection):
     # 3. Create operator_groups view that groups by normalized name
     # Uses just the FIRST WORD of well name as the operator name
     # This is the main view used by the API
-    # Detect column name: 'wells' parquet has 'licensee'/'name';
-    # 'well_attributes' fallback alias has 'licensee_code'/'well_name'.
+    # Detect available columns. Some SK-only runs have no well-name column, so
+    # use the BA/licensee code as a stable fallback grouping label.
     licensee_col, name_col = _detect_wells_columns(conn)
+    if not licensee_col:
+        logger.debug("Skipping operator_groups - no licensee column on wells")
+        return
+
+    operator_source_col = name_col or licensee_col
+    licensee_expr = _qualified_column(licensee_col)
+    operator_source_expr = _qualified_column(operator_source_col)
 
     conn.execute(f"""
         CREATE OR REPLACE VIEW operator_groups AS
         WITH ba_code_stats AS (
             -- Get the most common first word for each BA code
             SELECT
-                TRIM({licensee_col}) as ba_code,
-                UPPER(TRIM(SPLIT_PART({name_col}, ' ', 1))) as operator_name,
+                TRIM({licensee_expr}) as ba_code,
+                UPPER(TRIM(SPLIT_PART({operator_source_expr}, ' ', 1))) as operator_name,
                 COUNT(*) as well_count
             FROM wells
-            WHERE {licensee_col} IS NOT NULL AND TRIM({licensee_col}) != ''
-                AND {name_col} IS NOT NULL AND TRIM({name_col}) != ''
-            GROUP BY TRIM({licensee_col}), UPPER(TRIM(SPLIT_PART({name_col}, ' ', 1)))
+            WHERE {licensee_expr} IS NOT NULL AND TRIM({licensee_expr}) != ''
+                AND {operator_source_expr} IS NOT NULL AND TRIM({operator_source_expr}) != ''
+            GROUP BY TRIM({licensee_expr}), UPPER(TRIM(SPLIT_PART({operator_source_expr}, ' ', 1)))
         ),
         primary_names AS (
             -- Pick the most common name for each BA code
@@ -394,21 +428,31 @@ def _create_analyst_views(conn: duckdb.DuckDBPyConnection):
 
     # v_well_summary: one row per well with current status and cumulative production
     try:
+        wells_columns = _get_table_columns(conn, "wells")
         licensee_col, name_col = _detect_wells_columns(conn)
     except Exception:
-        licensee_col, name_col = "licensee", "name"
+        wells_columns = set()
+        licensee_col, name_col = None, None
+
+    status_col = _first_existing_column(
+        wells_columns,
+        ["well_stat_code", "stat_code", "lic_status", "licence_status"],
+    )
+    fluid_col = _first_existing_column(wells_columns, ["fluid", "well_substance", "well_fluid"])
+    mode_col = _first_existing_column(wells_columns, ["mode", "well_mode"])
+    province_col = _first_existing_column(wells_columns, ["province"])
 
     try:
         conn.execute(f"""
             CREATE OR REPLACE VIEW v_well_summary AS
             SELECT
                 w.uwi,
-                w.{name_col} AS well_name,
-                w.{licensee_col} AS licensee,
-                w.fluid,
-                w.mode,
-                w.province,
-                w.well_stat_code AS status_code,
+                {_nullable_column_expr(name_col, "w")} AS well_name,
+                {_nullable_column_expr(licensee_col, "w")} AS licensee,
+                {_nullable_column_expr(fluid_col, "w")} AS fluid,
+                {_nullable_column_expr(mode_col, "w")} AS mode,
+                {_nullable_column_expr(province_col, "w")} AS province,
+                {_nullable_column_expr(status_col, "w")} AS status_code,
                 COALESCE(p.total_oil, 0) AS cumulative_oil_m3,
                 COALESCE(p.total_gas, 0) AS cumulative_gas_e3m3,
                 COALESCE(p.total_water, 0) AS cumulative_water_m3,
@@ -435,23 +479,29 @@ def _create_analyst_views(conn: duckdb.DuckDBPyConnection):
         logger.debug(f"Skipping v_well_summary: {e}")
 
     # v_operator_scorecard: per-operator summary
-    try:
-        conn.execute(f"""
-            CREATE OR REPLACE VIEW v_operator_scorecard AS
-            SELECT
-                TRIM(w.{licensee_col}) AS operator_code,
-                COUNT(*) AS total_wells,
-                SUM(CASE WHEN w.mode != 'ABD' THEN 1 ELSE 0 END) AS active_wells,
-                SUM(CASE WHEN w.mode = 'ABD' THEN 1 ELSE 0 END) AS abandoned_wells,
-                SUM(CASE WHEN w.fluid LIKE 'CR%' THEN 1 ELSE 0 END) AS crude_wells,
-                SUM(CASE WHEN w.fluid = 'GAS' THEN 1 ELSE 0 END) AS gas_wells
-            FROM wells w
-            WHERE w.{licensee_col} IS NOT NULL AND TRIM(w.{licensee_col}) != ''
-            GROUP BY TRIM(w.{licensee_col})
-        """)
-        logger.info("Created view 'v_operator_scorecard'")
-    except Exception as e:
-        logger.debug(f"Skipping v_operator_scorecard: {e}")
+    if licensee_col:
+        try:
+            licensee_expr = _qualified_column(licensee_col, "w")
+            mode_expr = _nullable_column_expr(mode_col, "w")
+            fluid_expr = _nullable_column_expr(fluid_col, "w")
+            conn.execute(f"""
+                CREATE OR REPLACE VIEW v_operator_scorecard AS
+                SELECT
+                    TRIM({licensee_expr}) AS operator_code,
+                    COUNT(*) AS total_wells,
+                    SUM(CASE WHEN {mode_expr} != 'ABD' THEN 1 ELSE 0 END) AS active_wells,
+                    SUM(CASE WHEN {mode_expr} = 'ABD' THEN 1 ELSE 0 END) AS abandoned_wells,
+                    SUM(CASE WHEN {fluid_expr} LIKE 'CR%' THEN 1 ELSE 0 END) AS crude_wells,
+                    SUM(CASE WHEN {fluid_expr} = 'GAS' THEN 1 ELSE 0 END) AS gas_wells
+                FROM wells w
+                WHERE {licensee_expr} IS NOT NULL AND TRIM({licensee_expr}) != ''
+                GROUP BY TRIM({licensee_expr})
+            """)
+            logger.info("Created view 'v_operator_scorecard'")
+        except Exception as e:
+            logger.debug(f"Skipping v_operator_scorecard: {e}")
+    else:
+        logger.debug("Skipping v_operator_scorecard - no licensee column on wells")
 
     # v_monthly_provincial: provincial rollup by month
     try:
