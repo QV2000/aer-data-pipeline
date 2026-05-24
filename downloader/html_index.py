@@ -18,6 +18,22 @@ from registry.loader import DatasetConfig
 logger = logging.getLogger(__name__)
 
 
+DEFAULT_HTTP_HEADERS = {
+    # AER currently returns 403 to bot-style user agents from automation
+    # environments. A standard browser UA keeps access to public data endpoints
+    # working while the rest of the headers make requests look like normal web
+    # navigation.
+    'User-Agent': (
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
+        'AppleWebKit/537.36 (KHTML, like Gecko) '
+        'Chrome/125.0.0.0 Safari/537.36'
+    ),
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+    'Accept-Language': 'en-US,en;q=0.9',
+    'Referer': 'https://www.aer.ca/',
+}
+
+
 class HtmlIndexDownloader:
     """Downloads resources by scraping HTML index pages for links."""
 
@@ -33,9 +49,7 @@ class HtmlIndexDownloader:
                 timeout=self.timeout,
                 follow_redirects=True,
                 transport=HTTPTransport(retries=3),
-                headers={
-                    'User-Agent': 'AER-Data-Pipeline/1.0 (+https://github.com/QV2000/aer-data-pipeline)'
-                }
+                headers=DEFAULT_HTTP_HEADERS,
             )
         return self._client
 

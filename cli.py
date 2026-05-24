@@ -17,6 +17,7 @@ from datetime import datetime
 from pathlib import Path
 
 import requests
+from downloader.html_index import DEFAULT_HTTP_HEADERS
 from dateutil.relativedelta import relativedelta
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
@@ -577,14 +578,7 @@ def backfill_archives(dataset: str):
                 raw_dir = data_dir / "raw" / dataset_id
                 raw_dir.mkdir(parents=True, exist_ok=True)
 
-                headers = {
-                    'User-Agent': 'AER-Data-Pipeline/1.0 (+https://github.com/QV2000/aer-data-pipeline)',
-                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-                    'Accept-Language': 'en-US,en;q=0.5',
-                    'Referer': 'https://www.aer.ca/',
-                }
-
-                resp = _get_session().get(url, headers=headers, timeout=120)
+                resp = _get_session().get(url, headers=DEFAULT_HTTP_HEADERS, timeout=120)
                 if resp.status_code != 200:
                     click.echo(f"    Skipped (HTTP {resp.status_code})")
                     continue
