@@ -497,7 +497,7 @@ operator_production_rows AS MATERIALIZED (
         END AS prod_month,
         COALESCE(p.oil_prod_vol, 0)::DOUBLE AS oil_m3,
         ol.operator_id
-    FROM production_history p
+    FROM production p
     JOIN wells w
       ON w.uwi = p.uwi
     JOIN operator_lookup_for_digest ol

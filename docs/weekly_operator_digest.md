@@ -33,10 +33,11 @@ data-quality follow-up, not as "Unresolved operator" cards.
 in the workbook watchlist, but it is too low-confidence for the weekly operator
 email unless it is later promoted into an explicit watchlist section.
 
-Operator production stats in the digest come from `production_history` joined to
-canonical operators through the well operator BA code, not from the weekly
-opportunity rows. Cards do not show company-level first oil month because that
-is misleading for established producers.
+Operator production stats in the digest come from `production`, the current
+partitioned production view built from the monthly silver parts, joined to
+canonical operators through the well operator BA code. Cards do not show
+company-level first oil month because that is misleading for established
+producers.
 
 The digest excludes operators at or above 50,000 m3/month, using either latest
 month oil or trailing 12-month average. Those large producers belong in

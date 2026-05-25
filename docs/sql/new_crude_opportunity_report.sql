@@ -203,7 +203,7 @@ production_source AS (
         gas_prod_vol,
         water_prod_vol,
         COND
-    FROM production_history
+    FROM production
     WHERE uwi IS NOT NULL
       AND productionmonth IS NOT NULL
 ),

@@ -99,8 +99,8 @@ definition of "new well."
 | Finished drilling | `well_attributes.finished_drill_date` | Well reached finished drill status. | Useful bridge between spud and active/producing. | Not always current enough for weekly action. |
 | Active crude status | `status_changes`, `well_attributes.well_status_*` | Well moves into CR-OIL/CR-BIT FLOW/PUMP. | Strong crude signal before monthly production appears. | AB status data is richer than SK. |
 | Confidential release | `confidential_wells.release_date`, `wells.release_date` | Previously hidden well becomes visible. | High-value research/prospecting trigger. | Not necessarily a newly drilled well. |
-| First oil production | `production_history` | First reported oil volume above threshold. | Confirmed crude marketing opportunity. | Petrinex monthly lag means this is late. |
-| Restart / step change | `production_history` | Suspended/low producer resumes or materially increases oil volume. | Upsell or reactivation opportunity. | It is an opportunity signal, not a new-well signal. |
+| First oil production | `production` | First reported oil volume above threshold. | Confirmed crude marketing opportunity. | Petrinex monthly lag means this is late. |
+| Restart / step change | `production` | Suspended/low producer resumes or materially increases oil volume. | Upsell or reactivation opportunity. | It is an opportunity signal, not a new-well signal. |
 | Facility linkage | `well_attributes.linked_facility_id`, `facilities_enriched`, `facility_crude_reach` | Ties the well to batteries, hubs, and crude reachability. | Helps reps route the opportunity to the right commercial path. | Coverage depends on linked facility completeness. |
 
 ## Signal Definitions
@@ -166,7 +166,7 @@ be a first-class section because reps can finally see and research the well.
 
 ### E. First Confirmed Oil
 
-Use `production_history`.
+Use `production`.
 
 This is the best evidence for crude marketing, but it is delayed by monthly
 Petrinex reporting. It should confirm or upgrade existing watchlist wells.
@@ -193,7 +193,7 @@ facility subtype description, facility operator, and crude reachability.
 
 ### F. Production Momentum
 
-Use `production_history`.
+Use `production`.
 
 Two practical signals:
 
@@ -452,12 +452,12 @@ The workbook sheets are:
 - `lifecycle_timeline`
 
 Production-derived signals should be anchored to the latest parsed
-`production_history.productionmonth`, not wall-clock `CURRENT_DATE`, because
+`production.productionmonth`, not wall-clock `CURRENT_DATE`, because
 Petrinex reporting lags field activity.
 
 ## Risks
 
-- `production_history` retention controls whether "first oil" means first ever
+- `production` retention controls whether "first oil" means first ever
   or first seen in retained history.
 - A stateless weekly query will repeat production-month signals until the
   production window closes. If reps need "never sent before," add a sent-log or

@@ -56,7 +56,7 @@ REQUIRED_TABLES: dict[str, set[str]] = {
         "linked_facility_identifier",
         "linked_start_date",
     },
-    "production_history": {
+    "production": {
         "uwi",
         "productionmonth",
         "oil_prod_vol",
@@ -224,7 +224,7 @@ def run_report(conn: duckdb.DuckDBPyConnection, sql: str, sample_limit: int) -> 
                     uwi,
                     TRIM(CAST(productionmonth AS VARCHAR)) AS productionmonth_raw,
                     oil_prod_vol
-                FROM production_history
+                FROM production
                 WHERE uwi IS NOT NULL
                   AND productionmonth IS NOT NULL
             ),
@@ -273,7 +273,7 @@ def run_report(conn: duckdb.DuckDBPyConnection, sql: str, sample_limit: int) -> 
                     uwi,
                     TRIM(CAST(productionmonth AS VARCHAR)) AS productionmonth_raw,
                     oil_prod_vol
-                FROM production_history
+                FROM production
                 WHERE uwi IS NOT NULL
                   AND productionmonth IS NOT NULL
             ),
@@ -385,7 +385,7 @@ def run_report(conn: duckdb.DuckDBPyConnection, sql: str, sample_limit: int) -> 
                     uwi,
                     TRIM(CAST(productionmonth AS VARCHAR)) AS productionmonth_raw,
                     oil_prod_vol
-                FROM production_history
+                FROM production
                 WHERE uwi IS NOT NULL
                   AND productionmonth IS NOT NULL
             ),
