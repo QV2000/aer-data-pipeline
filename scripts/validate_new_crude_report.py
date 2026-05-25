@@ -66,7 +66,7 @@ REQUIRED_TABLES: dict[str, set[str]] = {
     },
     "well_licences": {"uwi", "well_name", "licensee", "issue_date", "well_completion_type"},
     "spud_activity": {"uwi", "spud_date"},
-    "status_changes": {"uwi", "event_date", "new_status"},
+    "status_changes": {"uwi", "event_date", "prev_status", "new_status"},
     "confidential_wells": {"uwi", "release_date"},
     "facility_crude_reach": {
         "facility_id",

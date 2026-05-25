@@ -767,6 +767,7 @@ candidate_opportunities AS (
         t.licence_date,
         t.spud_date,
         t.status_active_date,
+        t.status_transition_detail,
         t.confidential_release_date,
         t.first_oil_month,
         t.latest_oil_m3,
@@ -849,7 +850,7 @@ expanded_events AS (
         category,
         status_active_date AS event_date,
         'ACTIVE_CRUDE_STATUS' AS event_type,
-        'status changed to active crude' AS event_detail,
+        COALESCE(status_transition_detail, 'now active crude') AS event_detail,
         COALESCE(lsd_label, well_name, opportunity_id) AS well_or_battery_label,
         contact_priority_score,
         opportunity_id

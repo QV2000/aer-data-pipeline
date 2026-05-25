@@ -49,6 +49,11 @@ crude status, confidentiality release, first oil, and production movement.
 Timeline labels use the DLS/LSD-style well identifier where possible instead of
 generic well names.
 
+Active crude status events use `status_changes.prev_status` and `new_status`
+when available, but the email renders friendly status language instead of raw
+codes. For example, `DRL` is rendered as "drilling" and `CR-OIL FLOW` as
+"flowing crude oil."
+
 The HTML email renders only `new_operator`, `near_facility`, and
 `production_mover`. The `other` category remains queryable in
 `weekly_operator_digest` for diagnostics and later product decisions, but it is

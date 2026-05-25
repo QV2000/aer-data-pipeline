@@ -382,10 +382,12 @@ spud_context AS (
     GROUP BY sa.uwi
 ),
 
-status_context AS (
+status_events AS (
     SELECT
         sc.uwi,
-        MAX(CAST(sc.event_date AS DATE)) AS status_active_date
+        CAST(sc.event_date AS DATE) AS status_active_date,
+        NULLIF(TRIM(sc.prev_status), '') AS status_prev_status,
+        NULLIF(TRIM(sc.new_status), '') AS status_new_status
     FROM status_changes sc
     CROSS JOIN params p
     WHERE sc.uwi IS NOT NULL
@@ -398,7 +400,57 @@ status_context AS (
       AND UPPER(sc.new_status) NOT LIKE '%ABD%'
       AND UPPER(sc.new_status) NOT LIKE '%ABAN%'
       AND UPPER(sc.new_status) NOT LIKE '%SUSP%'
-    GROUP BY sc.uwi
+),
+
+status_context AS (
+    SELECT
+        uwi,
+        status_active_date,
+        status_prev_status,
+        status_new_status,
+        CASE
+            WHEN status_prev_label IS NOT NULL AND status_new_label IS NOT NULL
+            THEN 'was ' || status_prev_label || '; now ' || status_new_label
+            WHEN status_new_label IS NOT NULL
+            THEN 'now ' || status_new_label
+            ELSE 'now active crude'
+        END AS status_transition_detail
+    FROM (
+        SELECT
+            se.*,
+            CASE
+                WHEN status_prev_status IS NULL THEN NULL
+                WHEN UPPER(status_prev_status) LIKE '%DRL%' THEN 'drilling'
+                WHEN UPPER(status_prev_status) LIKE '%CONF%' THEN 'confidential'
+                WHEN UPPER(status_prev_status) LIKE '%SUSP%' THEN 'suspended'
+                WHEN UPPER(status_prev_status) LIKE '%ABD%'
+                  OR UPPER(status_prev_status) LIKE '%ABAN%' THEN 'abandoned'
+                WHEN UPPER(status_prev_status) LIKE 'CR-OIL%FLOW%' THEN 'flowing crude oil'
+                WHEN UPPER(status_prev_status) LIKE 'CR-OIL%PUMP%' THEN 'pumping crude oil'
+                WHEN UPPER(status_prev_status) LIKE 'CR-BIT%FLOW%' THEN 'flowing bitumen'
+                WHEN UPPER(status_prev_status) LIKE 'CR-BIT%PUMP%' THEN 'pumping bitumen'
+                WHEN UPPER(status_prev_status) LIKE 'CR-OIL%' THEN 'crude oil status'
+                WHEN UPPER(status_prev_status) LIKE 'CR-BIT%' THEN 'bitumen status'
+                WHEN UPPER(status_prev_status) LIKE 'GAS%' THEN 'gas status'
+                ELSE NULL
+            END AS status_prev_label,
+            CASE
+                WHEN status_new_status IS NULL THEN NULL
+                WHEN UPPER(status_new_status) LIKE 'CR-OIL%FLOW%' THEN 'flowing crude oil'
+                WHEN UPPER(status_new_status) LIKE 'CR-OIL%PUMP%' THEN 'pumping crude oil'
+                WHEN UPPER(status_new_status) LIKE 'CR-BIT%FLOW%' THEN 'flowing bitumen'
+                WHEN UPPER(status_new_status) LIKE 'CR-BIT%PUMP%' THEN 'pumping bitumen'
+                WHEN UPPER(status_new_status) LIKE 'CR-OIL%' THEN 'active crude oil'
+                WHEN UPPER(status_new_status) LIKE 'CR-BIT%' THEN 'active bitumen'
+                ELSE 'active crude'
+            END AS status_new_label,
+            ROW_NUMBER() OVER (
+                PARTITION BY se.uwi
+                ORDER BY se.status_active_date DESC, se.status_new_status DESC NULLS LAST
+            ) AS rn
+        FROM status_events se
+    )
+    WHERE rn = 1
 ),
 
 release_events AS (
@@ -468,6 +520,9 @@ well_context AS (
         lc.licence_date,
         spc.spud_date,
         stc.status_active_date,
+        stc.status_prev_status,
+        stc.status_new_status,
+        stc.status_transition_detail,
         rc.confidential_release_date,
         fo.first_oil_month,
         lp.latest_prod_month,
@@ -572,6 +627,9 @@ battery_context AS (
         MAX(lc.licence_date) AS licence_date,
         MAX(spc.spud_date) AS spud_date,
         MAX(stc.status_active_date) AS status_active_date,
+        MAX(stc.status_prev_status) AS status_prev_status,
+        MAX(stc.status_new_status) AS status_new_status,
+        MAX(stc.status_transition_detail) AS status_transition_detail,
         MAX(rc.confidential_release_date) AS confidential_release_date,
         g.first_oil_month,
         MAX(lp.latest_prod_month) AS latest_prod_month,
@@ -699,30 +757,23 @@ spud_signal AS (
 
 status_signal AS (
     SELECT
-        'WELL:' || sc.uwi AS opportunity_id,
+        'WELL:' || se.uwi AS opportunity_id,
         'WELL' AS opportunity_type,
-        sc.uwi,
+        se.uwi,
         wa.linked_facility_id,
         'ACTIVE_CRUDE_STATUS' AS signal_type,
-        CAST(sc.event_date AS DATE) AS signal_date,
+        se.status_active_date AS signal_date,
         80 AS signal_priority,
         'HIGH' AS confidence,
         'Call operator; well reached active crude status before production data lands.' AS recommended_action,
-        sc.new_status AS source_detail
-    FROM status_changes sc
-    LEFT JOIN well_attr wa ON wa.uwi = sc.uwi
-    LEFT JOIN well_crude_screen wcs ON wcs.uwi = sc.uwi
+        COALESCE(se.status_prev_status || ' -> ' || se.status_new_status, se.status_new_status) AS source_detail
+    FROM status_events se
+    LEFT JOIN well_attr wa ON wa.uwi = se.uwi
+    LEFT JOIN well_crude_screen wcs ON wcs.uwi = se.uwi
     CROSS JOIN params p
-    WHERE sc.uwi IS NOT NULL
-      AND CAST(sc.event_date AS DATE) >= p.report_cutoff
-      AND CAST(sc.event_date AS DATE) <= p.as_of_date
-      AND (
-          UPPER(sc.new_status) LIKE 'CR-OIL%'
-          OR UPPER(sc.new_status) LIKE 'CR-BIT%'
-      )
-      AND UPPER(sc.new_status) NOT LIKE '%ABD%'
-      AND UPPER(sc.new_status) NOT LIKE '%ABAN%'
-      AND UPPER(sc.new_status) NOT LIKE '%SUSP%'
+    WHERE se.uwi IS NOT NULL
+      AND se.status_active_date >= p.report_cutoff
+      AND se.status_active_date <= p.as_of_date
       AND NOT COALESCE(wcs.has_non_crude_evidence, FALSE)
 ),
 
@@ -1362,6 +1413,9 @@ SELECT
     oc.licence_date,
     oc.spud_date,
     oc.status_active_date,
+    oc.status_prev_status,
+    oc.status_new_status,
+    oc.status_transition_detail,
     oc.confidential_release_date,
     oc.first_oil_month,
     oc.latest_prod_month,
