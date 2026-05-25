@@ -21,7 +21,7 @@ import pandas as pd
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 
 
-CATEGORY_ORDER = ("new_operator", "near_facility", "production_mover")
+CATEGORY_ORDER = ("new_operator", "near_facility")
 DEFAULT_PREVIEW_PATH = Path("/tmp/digest_preview.html")
 
 
@@ -181,17 +181,15 @@ def fetch_digest_context(
         """
         SELECT *
         FROM weekly_operator_digest
-        WHERE category IN ('new_operator', 'near_facility', 'production_mover')
+        WHERE category IN ('new_operator', 'near_facility')
         ORDER BY
             CASE
                 WHEN category = 'new_operator' THEN 1
                 WHEN category = 'near_facility' THEN 2
-                WHEN category = 'production_mover' THEN 3
                 ELSE 9
             END,
             CASE WHEN category = 'new_operator' THEN operator_first_oil_month END DESC NULLS LAST,
             CASE WHEN category = 'near_facility' THEN min_distance_km END ASC NULLS LAST,
-            CASE WHEN category = 'production_mover' THEN mom_oil_delta_m3 END DESC NULLS LAST,
             display_operator
         """
     ).df()
@@ -224,8 +222,7 @@ def fetch_digest_context(
     subject = (
         f"TrendEnergy Radar — week of {week_start.strftime('%b ' + subject_day_format)}: "
         f"{counts['new_operator']} new operators, "
-        f"{counts['near_facility']} near facilities, "
-        f"{counts['production_mover']} production movers"
+        f"{counts['near_facility']} near facilities"
     )
 
     xlsx_url = os.getenv("DIGEST_XLSX_URL")
