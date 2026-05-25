@@ -19,6 +19,23 @@ too lagged to be the only trigger, but it should be the confirmation signal. For
 multiwell batteries, production confirmation should be grouped to avoid sending
 reps several duplicate rows for one commercial event.
 
+## Report Products
+
+The base `new_crude_opportunity_report` view is the source table. Two rep-facing
+products should be built from it:
+
+| Product | Cadence | Purpose | SQL View |
+| --- | --- | --- | --- |
+| Weekly Contact Queue | Weekly | Early outreach before volume confirms, with confirmed first-oil addendum. | `new_crude_weekly_contact_queue` |
+| Weekly Operator Summary | Weekly | Rank operators by current contact urgency and represented wells. | `new_crude_operator_weekly_summary` |
+| Monthly Confirmed Report | Monthly | Definitive production-backed wells/pads and production momentum. | `new_crude_monthly_confirmed_report` |
+| Monthly Operator Summary | Monthly | Rank operators by first oil, battery events, restarts, step changes, and oil size. | `new_crude_operator_monthly_summary` |
+| Lifecycle Timeline | Internal / API | Normalized stages, contact scores, and next expected signal. | `new_crude_lifecycle_timeline` |
+
+The derived SQL lives at
+`docs/sql/new_crude_sales_report_views.sql`. It depends on
+`docs/sql/new_crude_opportunity_report.sql`.
+
 ## Report Row Contract
 
 Each row represents one sales opportunity. A row can be a single well or a
@@ -48,6 +65,20 @@ Core fields:
 | `linked_facility_name` | Battery/facility name reps recognize. |
 | `linked_facility_sub_type_desc` | Human-readable SWB/MWB/bitumen/oil-sands facility subtype. |
 | `crude_hub_reach` | Whether facility context suggests crude marketing access. |
+
+Derived fields used by the sales reports:
+
+| Column | Purpose |
+| --- | --- |
+| `sales_section` | Report section: call now, confirmed new crude, research queue, watchlist, momentum. |
+| `contact_priority` | Rep-facing action bucket. |
+| `contact_priority_score` | Numeric sort order inside the queue. |
+| `sales_action` | Plain-language recommended action. |
+| `current_stage` | Lifecycle state such as `SPUDDED`, `ACTIVE_PRE_VOLUME`, or `CONFIRMED_PRODUCTION`. |
+| `next_expected_signal` | What the system expects to see next. |
+| `is_pre_production` | True when no first-oil month has landed yet. |
+| `is_production_backed` | True when the signal depends on production volume. |
+| `is_production_momentum` | True for restart/step-change rows that are not new-well leads. |
 
 ## Activity We Can Monitor
 
@@ -194,6 +225,21 @@ Recommended priority:
 
 Sort by priority, then latest signal date, then latest oil volume.
 
+For the weekly contact queue, use sales sections rather than raw signal ranking:
+
+1. `1_CALL_NOW_PRE_VOLUME`: `CONFIDENTIAL_RELEASE`, `ACTIVE_CRUDE_STATUS`, `SPUD_CRUDE_LIKELY` before first oil.
+2. `2_CONFIRMED_NEW_CRUDE`: `NEW_BATTERY_FIRST_OIL`, `FIRST_CONFIRMED_OIL`.
+3. `3_RESEARCH_QUEUE`: `LICENCE_OIL`.
+4. `4_WATCHLIST`: `SPUD_UNKNOWN_FLUID`.
+5. `5_PRODUCTION_MOMENTUM`: restart and step-change rows, kept out of the default new-well queue.
+
+For the monthly confirmed report, include only production-backed signals:
+
+1. `NEW_BATTERY_FIRST_OIL`
+2. `FIRST_CONFIRMED_OIL`
+3. `PRODUCTION_RESTART`
+4. `PRODUCTION_STEP_CHANGE`
+
 ## SK and BC Handling
 
 Do not parse coordinates from UWI in the report. Use stored coordinates from the
@@ -318,6 +364,22 @@ python scripts/validate_new_crude_report.py \
   --db /data/aer_data.duckdb \
   --sql docs/sql/new_crude_opportunity_report.sql
 ```
+
+Export the rep workbook with:
+
+```bash
+python scripts/export_new_crude_reports.py \
+  --db /data/aer_data.duckdb \
+  --out reports/new_crude_reports.xlsx
+```
+
+The workbook sheets are:
+
+- `weekly_contact_queue`
+- `weekly_operator_summary`
+- `monthly_confirmed`
+- `monthly_operator_summary`
+- `lifecycle_timeline`
 
 Production-derived signals should be anchored to the latest parsed
 `production_history.productionmonth`, not wall-clock `CURRENT_DATE`, because
