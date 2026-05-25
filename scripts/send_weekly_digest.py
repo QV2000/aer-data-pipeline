@@ -290,6 +290,21 @@ def format_distance(value: Any) -> str:
     return f"{float(value):.1f} km"
 
 
+def format_signal_label(value: Any) -> str:
+    labels = {
+        "LICENCE_OIL": "Licence issued",
+        "SPUD_CRUDE_LIKELY": "Spud",
+        "SPUD_UNKNOWN_FLUID": "Spud",
+        "ACTIVE_CRUDE_STATUS": "Active crude status",
+        "CONFIDENTIAL_RELEASE": "Confidentiality released",
+        "FIRST_CONFIRMED_OIL": "First oil confirmed",
+        "NEW_BATTERY_FIRST_OIL": "First oil confirmed",
+        "PRODUCTION_RESTART": "Production restart",
+        "PRODUCTION_STEP_CHANGE": "Production step change",
+    }
+    return labels.get(str(value), str(value).replace("_", " ").title())
+
+
 def render_html(template_path: Path, context: dict[str, Any]) -> str:
     env = Environment(
         loader=FileSystemLoader(str(template_path.parent)),
@@ -300,6 +315,7 @@ def render_html(template_path: Path, context: dict[str, Any]) -> str:
     env.filters["m3"] = format_m3
     env.filters["signed_m3"] = format_signed_m3
     env.filters["distance"] = format_distance
+    env.filters["signal_label"] = format_signal_label
     template = env.get_template(template_path.name)
     return template.render(**context)
 

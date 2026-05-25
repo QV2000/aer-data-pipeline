@@ -5,52 +5,39 @@
         <tr>
           <td style="vertical-align:top;">
             <div style="font-size:16px; line-height:22px; color:#17212b; font-weight:700;">{{ operator.display_operator }}</div>
-            <div style="font-size:12px; line-height:18px; color:#627d98; margin-top:2px;">
-              {{ operator.province or "Province n/a" }}
-              {% if operator.operator_short_name %}&nbsp;&middot;&nbsp;{{ operator.operator_short_name }}{% endif %}
-            </div>
           </td>
           <td align="right" style="vertical-align:top; font-size:12px; line-height:18px; color:#52606d;">
-            {% if operator.category == "production_mover" %}
-              <span style="font-size:16px; line-height:22px; color:#17212b; font-weight:700;">{{ operator.mom_oil_delta_m3|signed_m3 }}/mo</span>
-            {% else %}
-              {{ operator.min_distance_km|distance }} to nearest facility
+            {{ operator.province or "Province n/a" }}
+            {% if operator.min_distance_km is not none %}
+              &middot; {{ operator.min_distance_km|distance }} from {{ operator.nearest_facility_name or operator.nearest_facility_id or "nearest facility" }}
             {% endif %}
           </td>
         </tr>
       </table>
 
-      <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="width:100%; margin-top:12px;">
-        <tr>
-          <td style="width:33%; padding:0 8px 0 0; font-size:12px; line-height:18px; color:#52606d;">
-            <span style="display:block; color:#17212b; font-size:14px; line-height:20px; font-weight:700;">{{ operator.well_count_active|int }}</span>
-            producing wells
-          </td>
-          <td style="width:33%; padding:0 8px; font-size:12px; line-height:18px; color:#52606d;">
-            <span style="display:block; color:#17212b; font-size:14px; line-height:20px; font-weight:700;">{{ operator.operator_first_oil_month|month_label }}</span>
-            first oil month
-          </td>
-          <td style="width:33%; padding:0 0 0 8px; font-size:12px; line-height:18px; color:#52606d;">
-            <span style="display:block; color:#17212b; font-size:14px; line-height:20px; font-weight:700;">{{ operator.last_month_oil_m3|m3 }}</span>
-            last month oil
-          </td>
-        </tr>
-      </table>
-
-      {% if operator.category == "near_facility" %}
-      <div style="margin-top:12px; font-size:13px; line-height:19px; color:#52606d;">{{ operator.signal_count_7d|int }} new signals this week.</div>
-      {% elif operator.category == "production_mover" %}
-      <div style="margin-top:12px; font-size:13px; line-height:19px; color:#52606d;">Production changed by {{ operator.mom_oil_delta_m3|signed_m3 }} month-over-month.</div>
-      {% endif %}
+      <div style="margin-top:8px; font-size:13px; line-height:19px; color:#17212b;">
+        {% if operator.well_count_active is not none and operator.last_month_oil_m3 is not none %}
+          {{ operator.well_count_active|int }} wells &middot; {{ operator.last_month_oil_m3|m3 }} last month
+        {% else %}
+          production stats unavailable
+        {% endif %}
+        {% if operator.category == "near_facility" %}
+          &middot; {{ operator.signal_count_7d|int }} new signals this week
+        {% elif operator.category == "production_mover" %}
+          &middot; {{ operator.mom_oil_delta_m3|signed_m3 }}/mo
+        {% endif %}
+      </div>
 
       {% if operator.timeline %}
-      <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="width:100%; margin-top:12px; border-top:1px solid #edf2f7;">
+      <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="width:100%; margin-top:12px;">
         {% for event in operator.timeline %}
         <tr>
-          <td style="width:82px; padding:10px 10px 0 0; vertical-align:top; font-size:12px; line-height:18px; color:#627d98;">{{ event.event_date|date_label }}</td>
-          <td style="padding:10px 0 0 0; vertical-align:top;">
-            <div style="font-size:13px; line-height:18px; color:#17212b; font-weight:700;">{{ event.event_type }}</div>
-            <div style="font-size:12px; line-height:18px; color:#52606d;">{{ event.well_or_battery_label }}{% if event.event_detail %} — {{ event.event_detail }}{% endif %}</div>
+          <td style="width:14px; padding:8px 8px 0 0; vertical-align:top;">
+            <div style="width:6px; height:6px; border-radius:6px; background:#cfe4ff; margin-top:5px;"></div>
+          </td>
+          <td style="padding:8px 0 0 0; vertical-align:top;">
+            <div style="font-size:13px; line-height:18px; color:#17212b; font-weight:700;">{{ event.event_type|signal_label }}{% if event.well_or_battery_label %} &middot; {{ event.well_or_battery_label }}{% endif %}</div>
+            <div style="font-size:12px; line-height:18px; color:#52606d;">{% if event.event_type in ["FIRST_CONFIRMED_OIL", "NEW_BATTERY_FIRST_OIL"] %}{{ event.event_date|month_label }}{% else %}{{ event.event_date|date_label }}{% endif %}{% if event.event_detail %} &middot; {{ event.event_detail }}{% endif %}</div>
           </td>
         </tr>
         {% endfor %}

@@ -35,9 +35,14 @@ email unless it is later promoted into an explicit watchlist section.
 
 Operator production stats in the digest come from `production_history` joined to
 canonical operators through the well operator BA code, not from the weekly
-opportunity rows. `operator_first_oil_month` is suppressed when it equals the
-warehouse retention floor, so established operators do not all display the same
-artificial first month.
+opportunity rows. Cards do not show company-level first oil month because that
+is misleading for established producers.
+
+Each card includes the nearest TEMI facility name and distance, plus up to three
+lifecycle events expanded from the opportunity row dates: licence, spud, active
+crude status, confidentiality release, first oil, and production movement.
+Timeline labels use the DLS/LSD-style well identifier where possible instead of
+generic well names.
 
 The HTML email renders only `new_operator`, `near_facility`, and
 `production_mover`. The `other` category remains queryable in

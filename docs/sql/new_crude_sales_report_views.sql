@@ -444,6 +444,14 @@ WITH digest_params AS (
         CURRENT_DATE::DATE AS as_of_date,
         (CURRENT_DATE - INTERVAL 7 DAY)::DATE AS week_cutoff
 ),
+temi_facility_names(facility_id, facility_name) AS (
+    VALUES
+        ('ABTM0000930', 'Cynthia Pembina'),
+        ('ABTM0112311', 'Rush Energy Services'),
+        ('ABTM0125201', 'Vermilion 15-16-051-11W5'),
+        ('ABTM0157119', 'Persist Wayne'),
+        ('SKTMTT15003', 'Dulwich')
+),
 operator_lookup_for_digest AS MATERIALIZED (
     SELECT
         identifier_kind,
@@ -694,10 +702,11 @@ SELECT
         CASE WHEN r.is_new_operator THEN r.radar_operator_first_oil_month ELSE NULL END
     ) AS operator_first_oil_month,
     n.nearest_facility_id,
+    tfn.facility_name AS nearest_facility_name,
     r.min_distance_km,
     r.signal_count_7d,
-    COALESCE(ps.well_count_active, r.opportunity_well_count_active, 0)::INTEGER AS well_count_active,
-    ROUND(COALESCE(ps.last_month_oil_m3, r.opportunity_last_month_oil_m3, 0), 1) AS last_month_oil_m3,
+    COALESCE(ps.well_count_active, NULLIF(r.opportunity_well_count_active, 0))::INTEGER AS well_count_active,
+    ROUND(COALESCE(ps.last_month_oil_m3, NULLIF(r.opportunity_last_month_oil_m3, 0)), 1) AS last_month_oil_m3,
     r.category,
     r.has_production_mover,
     r.production_mover_signal_date,
@@ -706,6 +715,8 @@ FROM category_rows r
 LEFT JOIN operator_nearest n
   ON n.operator_key = r.operator_key
  AND n.rn = 1
+LEFT JOIN temi_facility_names tfn
+  ON tfn.facility_id = n.nearest_facility_id
 LEFT JOIN operator_production_stats ps
   ON ps.operator_id = r.operator_id
 ORDER BY
@@ -726,63 +737,34 @@ WITH digest_params AS (
         CURRENT_DATE::DATE AS as_of_date,
         (CURRENT_DATE - INTERVAL 7 DAY)::DATE AS week_cutoff
 ),
-candidate_events AS (
+candidate_opportunities AS (
     SELECT
         d.operator_key,
         d.operator_id,
         d.display_operator,
         d.category,
-        t.latest_signal_date AS event_date,
-        t.primary_signal AS event_type,
-        CASE
-            WHEN t.primary_signal = 'LICENCE_OIL'
-            THEN 'oil licence issued'
-            WHEN t.primary_signal = 'SPUD_CRUDE_LIKELY'
-            THEN 'spud, crude likely'
-            WHEN t.primary_signal = 'SPUD_UNKNOWN_FLUID'
-            THEN 'spud, fluid not yet classified'
-            WHEN t.primary_signal = 'ACTIVE_CRUDE_STATUS'
-            THEN 'status changed to active crude'
-            WHEN t.primary_signal = 'CONFIDENTIAL_RELEASE'
-            THEN 'confidentiality released'
-            WHEN t.primary_signal = 'FIRST_CONFIRMED_OIL'
-            THEN 'first oil produced (' || ROUND(COALESCE(t.latest_oil_m3, 0), 1)::VARCHAR || ' m3)'
-            WHEN t.primary_signal = 'NEW_BATTERY_FIRST_OIL'
-            THEN 'pad first oil produced (' || ROUND(COALESCE(t.latest_oil_m3, 0), 1)::VARCHAR || ' m3)'
-            WHEN t.primary_signal = 'PRODUCTION_RESTART'
-            THEN 'production restarted ('
-                || CASE
-                    WHEN COALESCE(NULLIF(t.latest_mom_oil_delta_m3, 0), d.mom_oil_delta_m3, t.latest_oil_m3, 0) >= 0
-                    THEN '+'
-                    ELSE ''
-                END
-                || ROUND(COALESCE(NULLIF(t.latest_mom_oil_delta_m3, 0), d.mom_oil_delta_m3, t.latest_oil_m3, 0), 1)::VARCHAR
-                || ' m3 MoM)'
-            WHEN t.primary_signal = 'PRODUCTION_STEP_CHANGE'
-            THEN 'production step change ('
-                || CASE
-                    WHEN COALESCE(NULLIF(t.latest_mom_oil_delta_m3, 0), d.mom_oil_delta_m3, t.latest_oil_m3, 0) >= 0
-                    THEN '+'
-                    ELSE ''
-                END
-                || ROUND(COALESCE(NULLIF(t.latest_mom_oil_delta_m3, 0), d.mom_oil_delta_m3, t.latest_oil_m3, 0), 1)::VARCHAR
-                || ' m3 MoM)'
-            ELSE COALESCE(t.primary_source_detail, '')
-        END AS event_detail,
-        COALESCE(t.linked_facility_name, t.well_name, t.opportunity_id) AS well_or_battery_label,
-        ROW_NUMBER() OVER (
-            PARTITION BY d.operator_key, d.category
-            ORDER BY
-                CASE
-                    WHEN d.category = 'production_mover'
-                     AND t.primary_signal IN ('PRODUCTION_RESTART', 'PRODUCTION_STEP_CHANGE')
-                    THEN 0
-                    ELSE 1
-                END,
-                t.latest_signal_date DESC,
-                t.contact_priority_score DESC,
-                t.opportunity_id
-        ) AS event_rank
+        d.mom_oil_delta_m3,
+        t.opportunity_id,
+        t.opportunity_type,
+        t.primary_signal,
+        t.latest_signal_date,
+        t.contact_priority_score,
+        t.licence_date,
+        t.spud_date,
+        t.status_active_date,
+        t.confidential_release_date,
+        t.first_oil_month,
+        t.latest_oil_m3,
+        t.latest_mom_oil_delta_m3,
+        t.uwi,
+        t.wells_in_pad,
+        t.well_count,
+        t.well_name,
+        t.linked_facility_name,
+        COALESCE(
+            NULLIF(REGEXP_EXTRACT(t.uwi, '^[0-9]{2}/([^/]+)/[0-9]+$', 1), ''),
+            t.uwi
+        ) AS lsd_label
     FROM weekly_operator_digest d
     JOIN new_crude_lifecycle_timeline t
       ON COALESCE(
@@ -813,6 +795,135 @@ candidate_events AS (
               AND t.latest_signal_date = d.production_mover_signal_date
           )
       )
+),
+expanded_events AS (
+    SELECT
+        operator_key,
+        operator_id,
+        display_operator,
+        category,
+        licence_date AS event_date,
+        'LICENCE_OIL' AS event_type,
+        'oil licence issued' AS event_detail,
+        COALESCE(lsd_label, well_name, opportunity_id) AS well_or_battery_label,
+        contact_priority_score,
+        opportunity_id
+    FROM candidate_opportunities
+    WHERE licence_date IS NOT NULL
+      AND category != 'production_mover'
+    UNION ALL
+    SELECT
+        operator_key,
+        operator_id,
+        display_operator,
+        category,
+        spud_date AS event_date,
+        'SPUD_CRUDE_LIKELY' AS event_type,
+        'spudded' AS event_detail,
+        COALESCE(lsd_label, well_name, opportunity_id) AS well_or_battery_label,
+        contact_priority_score,
+        opportunity_id
+    FROM candidate_opportunities
+    WHERE spud_date IS NOT NULL
+      AND category != 'production_mover'
+    UNION ALL
+    SELECT
+        operator_key,
+        operator_id,
+        display_operator,
+        category,
+        status_active_date AS event_date,
+        'ACTIVE_CRUDE_STATUS' AS event_type,
+        'status changed to active crude' AS event_detail,
+        COALESCE(lsd_label, well_name, opportunity_id) AS well_or_battery_label,
+        contact_priority_score,
+        opportunity_id
+    FROM candidate_opportunities
+    WHERE status_active_date IS NOT NULL
+      AND category != 'production_mover'
+    UNION ALL
+    SELECT
+        operator_key,
+        operator_id,
+        display_operator,
+        category,
+        confidential_release_date AS event_date,
+        'CONFIDENTIAL_RELEASE' AS event_type,
+        'confidentiality released' AS event_detail,
+        COALESCE(lsd_label, well_name, opportunity_id) AS well_or_battery_label,
+        contact_priority_score,
+        opportunity_id
+    FROM candidate_opportunities
+    WHERE confidential_release_date IS NOT NULL
+      AND category != 'production_mover'
+    UNION ALL
+    SELECT
+        operator_key,
+        operator_id,
+        display_operator,
+        category,
+        first_oil_month AS event_date,
+        CASE
+            WHEN opportunity_type = 'BATTERY' THEN 'NEW_BATTERY_FIRST_OIL'
+            ELSE 'FIRST_CONFIRMED_OIL'
+        END AS event_type,
+        CASE
+            WHEN opportunity_type = 'BATTERY'
+            THEN 'pad first oil produced (' || ROUND(COALESCE(latest_oil_m3, 0), 1)::VARCHAR || ' m3)'
+            ELSE 'first oil produced (' || ROUND(COALESCE(latest_oil_m3, 0), 1)::VARCHAR || ' m3)'
+        END AS event_detail,
+        CASE
+            WHEN opportunity_type = 'BATTERY'
+            THEN COALESCE(well_count::VARCHAR || ' wells, multi-well battery', linked_facility_name, well_name, opportunity_id)
+            ELSE COALESCE(lsd_label, well_name, opportunity_id)
+        END AS well_or_battery_label,
+        contact_priority_score,
+        opportunity_id
+    FROM candidate_opportunities
+    WHERE first_oil_month IS NOT NULL
+      AND category != 'production_mover'
+    UNION ALL
+    SELECT
+        operator_key,
+        operator_id,
+        display_operator,
+        category,
+        latest_signal_date AS event_date,
+        primary_signal AS event_type,
+        CASE
+            WHEN primary_signal = 'PRODUCTION_RESTART'
+            THEN 'production restarted ('
+                || CASE
+                    WHEN COALESCE(NULLIF(latest_mom_oil_delta_m3, 0), mom_oil_delta_m3, latest_oil_m3, 0) >= 0
+                    THEN '+'
+                    ELSE ''
+                END
+                || ROUND(COALESCE(NULLIF(latest_mom_oil_delta_m3, 0), mom_oil_delta_m3, latest_oil_m3, 0), 1)::VARCHAR
+                || ' m3 MoM)'
+            ELSE 'production step change ('
+                || CASE
+                    WHEN COALESCE(NULLIF(latest_mom_oil_delta_m3, 0), mom_oil_delta_m3, latest_oil_m3, 0) >= 0
+                    THEN '+'
+                    ELSE ''
+                END
+                || ROUND(COALESCE(NULLIF(latest_mom_oil_delta_m3, 0), mom_oil_delta_m3, latest_oil_m3, 0), 1)::VARCHAR
+                || ' m3 MoM)'
+        END AS event_detail,
+        COALESCE(lsd_label, well_name, opportunity_id) AS well_or_battery_label,
+        contact_priority_score,
+        opportunity_id
+    FROM candidate_opportunities
+    WHERE primary_signal IN ('PRODUCTION_RESTART', 'PRODUCTION_STEP_CHANGE')
+),
+ranked_events AS (
+    SELECT
+        *,
+        ROW_NUMBER() OVER (
+            PARTITION BY operator_key, category
+            ORDER BY event_date DESC, contact_priority_score DESC, opportunity_id, event_type
+        ) AS event_rank
+    FROM expanded_events
+    WHERE event_date IS NOT NULL
 )
 SELECT
     operator_key,
@@ -823,7 +934,7 @@ SELECT
     event_type,
     event_detail,
     well_or_battery_label
-FROM candidate_events
+FROM ranked_events
 WHERE (
         category = 'production_mover'
         AND event_rank <= 1
