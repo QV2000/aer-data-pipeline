@@ -16,11 +16,13 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
+import click
 import requests
-from downloader.html_index import DEFAULT_HTTP_HEADERS
 from dateutil.relativedelta import relativedelta
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
+
+from downloader.html_index import DEFAULT_HTTP_HEADERS
 
 
 def _get_session():
@@ -30,8 +32,6 @@ def _get_session():
         max_retries=Retry(total=3, backoff_factor=1, status_forcelist=[429, 500, 502, 503])
     ))
     return s
-
-import click
 
 # Add project to path
 sys.path.insert(0, str(Path(__file__).parent))
