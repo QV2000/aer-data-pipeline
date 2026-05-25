@@ -175,7 +175,7 @@ window for lagged reporting:
 | `report_days` | 7 | licence, spud, status, release, restart/step-change events |
 | `watchlist_days` | 30 | early licence/spud watchlist scope |
 | `lifecycle_context_days` | 180 | older licence/spud/status dates shown as context for current signals |
-| `production_months` | 3 | first oil, because production is reported monthly |
+| `production_months` | 6 | first oil, because production is monthly and Petrinex lags current activity |
 | `oil_threshold_m3` | 1.0 | suppress tiny/null production noise |
 
 ## Ranking
@@ -312,6 +312,10 @@ python scripts/validate_new_crude_report.py \
   --db /data/aer_data.duckdb \
   --sql docs/sql/new_crude_opportunity_report.sql
 ```
+
+Production-derived signals should be anchored to the latest parsed
+`production_history.productionmonth`, not wall-clock `CURRENT_DATE`, because
+Petrinex reporting lags field activity.
 
 ## Risks
 

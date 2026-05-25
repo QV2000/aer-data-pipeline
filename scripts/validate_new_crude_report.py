@@ -206,23 +206,87 @@ def run_report(conn: duckdb.DuckDBPyConnection, sql: str, sample_limit: int) -> 
         )
     )[0]
 
-    first_oil_linkage = rows_as_dicts(
+    production_diagnostic = rows_as_dicts(
         conn.execute(
             """
-            WITH production_clean AS (
+            WITH production_source AS (
                 SELECT
                     uwi,
-                    CASE
-                        WHEN TRY_CAST(productionmonth AS DATE) IS NOT NULL THEN
-                            TRY_CAST(productionmonth AS DATE)
-                        WHEN LENGTH(CAST(productionmonth AS VARCHAR)) = 7 THEN
-                            CAST(CAST(productionmonth AS VARCHAR) || '-01' AS DATE)
-                        ELSE NULL
-                    END AS prod_month,
-                    COALESCE(oil_prod_vol, 0) AS oil_prod_vol
+                    TRIM(CAST(productionmonth AS VARCHAR)) AS productionmonth_raw,
+                    oil_prod_vol
                 FROM production_history
                 WHERE uwi IS NOT NULL
                   AND productionmonth IS NOT NULL
+            ),
+            production_clean AS (
+                SELECT
+                    uwi,
+                    CASE
+                        WHEN REGEXP_MATCHES(productionmonth_raw, '^[0-9]{4}-[0-9]{2}-[0-9]{2}$') THEN
+                            CAST(productionmonth_raw AS DATE)
+                        WHEN REGEXP_MATCHES(productionmonth_raw, '^[0-9]{4}-[0-9]{2}$') THEN
+                            CAST(productionmonth_raw || '-01' AS DATE)
+                        WHEN REGEXP_MATCHES(productionmonth_raw, '^[0-9]{6}$') THEN
+                            CAST(STRPTIME(productionmonth_raw, '%Y%m') AS DATE)
+                        WHEN TRY_CAST(productionmonth_raw AS DATE) IS NOT NULL THEN
+                            DATE_TRUNC('month', TRY_CAST(productionmonth_raw AS DATE))::DATE
+                        ELSE NULL
+                    END AS prod_month,
+                    COALESCE(oil_prod_vol, 0) AS oil_prod_vol
+                FROM production_source
+            ),
+            production_bounds AS (
+                SELECT MAX(prod_month) AS latest_production_month
+                FROM production_clean
+            )
+            SELECT COUNT(*) AS production_rows,
+                   COUNT(*) FILTER (WHERE prod_month IS NOT NULL) AS parsed_month_rows,
+                   MIN(prod_month) AS min_prod_month,
+                   MAX(prod_month) AS max_prod_month,
+                   MAX(prod_month) - INTERVAL 5 MONTH AS production_cutoff,
+                   COUNT(*) FILTER (WHERE oil_prod_vol >= 1.0) AS oil_rows,
+                   COUNT(DISTINCT uwi) FILTER (WHERE oil_prod_vol >= 1.0) AS oil_wells,
+                   COUNT(*) FILTER (
+                       WHERE oil_prod_vol >= 1.0
+                         AND prod_month >= (SELECT latest_production_month - INTERVAL 5 MONTH FROM production_bounds)
+                   ) AS oil_rows_in_signal_window
+            FROM production_clean
+            """
+        )
+    )[0]
+
+    first_oil_linkage = rows_as_dicts(
+        conn.execute(
+            """
+            WITH production_source AS (
+                SELECT
+                    uwi,
+                    TRIM(CAST(productionmonth AS VARCHAR)) AS productionmonth_raw,
+                    oil_prod_vol
+                FROM production_history
+                WHERE uwi IS NOT NULL
+                  AND productionmonth IS NOT NULL
+            ),
+            production_clean AS (
+                SELECT
+                    uwi,
+                    CASE
+                        WHEN REGEXP_MATCHES(productionmonth_raw, '^[0-9]{4}-[0-9]{2}-[0-9]{2}$') THEN
+                            CAST(productionmonth_raw AS DATE)
+                        WHEN REGEXP_MATCHES(productionmonth_raw, '^[0-9]{4}-[0-9]{2}$') THEN
+                            CAST(productionmonth_raw || '-01' AS DATE)
+                        WHEN REGEXP_MATCHES(productionmonth_raw, '^[0-9]{6}$') THEN
+                            CAST(STRPTIME(productionmonth_raw, '%Y%m') AS DATE)
+                        WHEN TRY_CAST(productionmonth_raw AS DATE) IS NOT NULL THEN
+                            DATE_TRUNC('month', TRY_CAST(productionmonth_raw AS DATE))::DATE
+                        ELSE NULL
+                    END AS prod_month,
+                    COALESCE(oil_prod_vol, 0) AS oil_prod_vol
+                FROM production_source
+            ),
+            production_bounds AS (
+                SELECT MAX(prod_month) AS latest_production_month
+                FROM production_clean
             ),
             first_oil AS (
                 SELECT uwi, MIN(prod_month) AS first_oil_month
@@ -241,10 +305,67 @@ def run_report(conn: duckdb.DuckDBPyConnection, sql: str, sample_limit: int) -> 
                    ) AS multiwell_crude_facility_linked
             FROM first_oil fo
             LEFT JOIN well_attributes wa USING (uwi)
-            WHERE fo.first_oil_month >= DATE_TRUNC('month', CURRENT_DATE) - INTERVAL 3 MONTH
+            WHERE fo.first_oil_month >= (
+                SELECT latest_production_month - INTERVAL 5 MONTH
+                FROM production_bounds
+            )
             """
         )
     )[0]
+
+    first_oil_by_month = rows_as_dicts(
+        conn.execute(
+            """
+            WITH production_source AS (
+                SELECT
+                    uwi,
+                    TRIM(CAST(productionmonth AS VARCHAR)) AS productionmonth_raw,
+                    oil_prod_vol
+                FROM production_history
+                WHERE uwi IS NOT NULL
+                  AND productionmonth IS NOT NULL
+            ),
+            production_clean AS (
+                SELECT
+                    uwi,
+                    CASE
+                        WHEN REGEXP_MATCHES(productionmonth_raw, '^[0-9]{4}-[0-9]{2}-[0-9]{2}$') THEN
+                            CAST(productionmonth_raw AS DATE)
+                        WHEN REGEXP_MATCHES(productionmonth_raw, '^[0-9]{4}-[0-9]{2}$') THEN
+                            CAST(productionmonth_raw || '-01' AS DATE)
+                        WHEN REGEXP_MATCHES(productionmonth_raw, '^[0-9]{6}$') THEN
+                            CAST(STRPTIME(productionmonth_raw, '%Y%m') AS DATE)
+                        WHEN TRY_CAST(productionmonth_raw AS DATE) IS NOT NULL THEN
+                            DATE_TRUNC('month', TRY_CAST(productionmonth_raw AS DATE))::DATE
+                        ELSE NULL
+                    END AS prod_month,
+                    COALESCE(oil_prod_vol, 0) AS oil_prod_vol
+                FROM production_source
+            ),
+            first_oil AS (
+                SELECT uwi, MIN(prod_month) AS first_oil_month
+                FROM production_clean
+                WHERE oil_prod_vol >= 1.0
+                  AND prod_month IS NOT NULL
+                GROUP BY uwi
+            )
+            SELECT fo.first_oil_month,
+                   COUNT(*) AS first_oil_wells,
+                   COUNT(*) FILTER (WHERE wa.linked_facility_id IS NOT NULL) AS with_facility,
+                   COUNT(*) FILTER (
+                       WHERE wa.linked_facility_sub_type IN ('322','311','341','342','344','506')
+                   ) AS crude_facility_linked,
+                   COUNT(*) FILTER (
+                       WHERE wa.linked_facility_sub_type IN ('322','341','342','344','506')
+                   ) AS multiwell_crude_facility_linked
+            FROM first_oil fo
+            LEFT JOIN well_attributes wa USING (uwi)
+            GROUP BY fo.first_oil_month
+            ORDER BY fo.first_oil_month DESC
+            LIMIT 12
+            """
+        )
+    )
 
     battery_subtypes = rows_as_dicts(
         conn.execute(
@@ -283,7 +404,9 @@ def run_report(conn: duckdb.DuckDBPyConnection, sql: str, sample_limit: int) -> 
         "counts_by_signal": counts_by_signal,
         "opportunity_totals": opportunity_totals,
         "battery_collapse": battery_collapse,
+        "production_diagnostic": production_diagnostic,
         "first_oil_linkage": first_oil_linkage,
+        "first_oil_by_month": first_oil_by_month,
         "battery_subtypes": battery_subtypes,
         "sample_rows": sample_rows,
     }
@@ -306,8 +429,18 @@ def print_text(result: dict[str, Any]) -> None:
     print("\nBattery collapse")
     print(result["battery_collapse"])
 
+    print("\nProduction diagnostic")
+    print(result["production_diagnostic"])
+
     print("\nFirst-oil linkage diagnostic")
     print(result["first_oil_linkage"])
+
+    print("\nFirst-oil by month")
+    if result["first_oil_by_month"]:
+        for row in result["first_oil_by_month"]:
+            print(f"- {row}")
+    else:
+        print("- No first-oil rows")
 
     print("\nBattery subtype breakdown")
     if result["battery_subtypes"]:

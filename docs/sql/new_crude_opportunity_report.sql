@@ -13,13 +13,13 @@
 
 CREATE OR REPLACE VIEW new_crude_opportunity_report AS
 WITH
-params AS (
+base_params AS (
     SELECT
         CURRENT_DATE::DATE AS as_of_date,
         (CURRENT_DATE - INTERVAL 7 DAY)::DATE AS report_cutoff,
         (CURRENT_DATE - INTERVAL 30 DAY)::DATE AS watchlist_cutoff,
         (CURRENT_DATE - INTERVAL 180 DAY)::DATE AS lifecycle_cutoff,
-        (DATE_TRUNC('month', CURRENT_DATE) - INTERVAL 3 MONTH)::DATE AS production_cutoff,
+        6 AS production_window_months,
         1.0::DOUBLE AS oil_threshold_m3
 ),
 
@@ -119,13 +119,31 @@ facility_context AS (
     GROUP BY facility_id
 ),
 
+production_source AS (
+    SELECT
+        uwi,
+        TRIM(CAST(productionmonth AS VARCHAR)) AS productionmonth_raw,
+        oil_prod_vol,
+        gas_prod_vol,
+        water_prod_vol,
+        COND
+    FROM production_history
+    WHERE uwi IS NOT NULL
+      AND productionmonth IS NOT NULL
+),
+
 production_clean AS (
     SELECT
         uwi,
         CASE
-            WHEN TRY_CAST(productionmonth AS DATE) IS NOT NULL THEN TRY_CAST(productionmonth AS DATE)
-            WHEN LENGTH(CAST(productionmonth AS VARCHAR)) = 7 THEN
-                CAST(CAST(productionmonth AS VARCHAR) || '-01' AS DATE)
+            WHEN REGEXP_MATCHES(productionmonth_raw, '^[0-9]{4}-[0-9]{2}-[0-9]{2}$') THEN
+                CAST(productionmonth_raw AS DATE)
+            WHEN REGEXP_MATCHES(productionmonth_raw, '^[0-9]{4}-[0-9]{2}$') THEN
+                CAST(productionmonth_raw || '-01' AS DATE)
+            WHEN REGEXP_MATCHES(productionmonth_raw, '^[0-9]{6}$') THEN
+                CAST(STRPTIME(productionmonth_raw, '%Y%m') AS DATE)
+            WHEN TRY_CAST(productionmonth_raw AS DATE) IS NOT NULL THEN
+                DATE_TRUNC('month', TRY_CAST(productionmonth_raw AS DATE))::DATE
             ELSE NULL
         END AS prod_month,
         COALESCE(oil_prod_vol, 0)::DOUBLE AS oil_prod_vol,
@@ -133,9 +151,24 @@ production_clean AS (
         COALESCE(water_prod_vol, 0)::DOUBLE AS water_prod_vol,
         COALESCE(COND, 0)::DOUBLE AS cond_prod_vol,
         CAST(NULL AS DOUBLE) AS hours_on
-    FROM production_history
-    WHERE uwi IS NOT NULL
-      AND productionmonth IS NOT NULL
+    FROM production_source
+),
+
+production_bounds AS (
+    SELECT MAX(prod_month) AS latest_production_month
+    FROM production_clean
+),
+
+params AS (
+    SELECT
+        bp.*,
+        pb.latest_production_month,
+        (
+            COALESCE(pb.latest_production_month, DATE_TRUNC('month', bp.as_of_date)::DATE)
+            - INTERVAL 5 MONTH
+        )::DATE AS production_cutoff
+    FROM base_params bp
+    CROSS JOIN production_bounds pb
 ),
 
 first_oil AS (
