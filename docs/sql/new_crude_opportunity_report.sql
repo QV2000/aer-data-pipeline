@@ -1137,6 +1137,152 @@ resolved_operator AS (
     LEFT JOIN operator_lookup_norm raw_sk
       ON raw_sk.identifier_kind = 'sk_legal_name'
      AND raw_sk.identifier_value_norm = k.raw_operator_norm
+),
+
+-- ============================================================================
+-- Phase 1 additions: TEMI facilities + well proximity + operator enrichment.
+-- Inlined as CTEs (not persisted) so the report stays read-only by default.
+-- Promote to a `temi_facilities` seed table + `well_proximity` view +
+-- ALTER TABLE operators columns in a follow-up if persistence is needed.
+-- ============================================================================
+
+temi_facilities AS (
+    -- Source: seeds/temi_facilities.csv. Coords verified against
+    -- _facilities_with_coords on 2026-05-25 except SKTMTT15003 which uses
+    -- user-provided coordinates (warehouse had ~6km offset).
+    SELECT * FROM (VALUES
+        ('ABTM0000930', 'Cynthia Pembina Terminal',        'Bench Creek Resources Ltd.',  'AB', 53.310727, -115.619797),
+        ('ABTM0112311', 'Rush Energy Services Inc.',       'Rush Energy Services Inc.',   'AB', 53.099561, -114.474046),
+        ('ABTM0125201', 'Vermilion 15-16-051-11w5 Tm',     'Vermilion Energy Inc.',       'AB', 53.408441, -115.558574),
+        ('ABTM0157119', 'Persist Wayne Oil Terminal',      'Persist Oil And Gas Inc.',    'AB', 51.403331, -112.914700),
+        ('SKTMTT15003', 'Dulwich Terminal (COP D11A)',     'Marlin Resources Ltd.',       'SK', 53.165195, -109.703831)
+    ) AS t(facility_id, facility_name, operator_company, province, lat, lon)
+),
+
+well_proximity_calc AS (
+    -- Haversine distance from each well centroid to each TEMI facility.
+    -- Earth radius 6371 km. Only wells with non-null centroids are scored.
+    SELECT
+        wc.uwi,
+        tf.facility_id,
+        (2.0 * 6371.0 * ASIN(SQRT(
+            POW(SIN(RADIANS(tf.lat - wc.centroid_lat) / 2.0), 2)
+            + COS(RADIANS(wc.centroid_lat))
+              * COS(RADIANS(tf.lat))
+              * POW(SIN(RADIANS(tf.lon - wc.centroid_lon) / 2.0), 2)
+        ))) AS distance_km
+    FROM well_coords wc
+    CROSS JOIN temi_facilities tf
+    WHERE wc.centroid_lat IS NOT NULL
+      AND wc.centroid_lon IS NOT NULL
+),
+
+well_proximity AS MATERIALIZED (
+    SELECT
+        uwi,
+        nearest_facility_id,
+        distance_km,
+        CASE
+            WHEN distance_km < 25  THEN 'within_25'
+            WHEN distance_km < 50  THEN 'within_50'
+            WHEN distance_km < 100 THEN 'within_100'
+            ELSE                        'beyond'
+        END AS proximity_bucket
+    FROM (
+        SELECT
+            uwi,
+            facility_id AS nearest_facility_id,
+            distance_km,
+            ROW_NUMBER() OVER (PARTITION BY uwi ORDER BY distance_km ASC) AS rn
+        FROM well_proximity_calc
+    )
+    WHERE rn = 1
+),
+
+-- Tunable thresholds for operator size tier.
+tier_params AS (
+    SELECT
+        50000.0::DOUBLE AS lower_priority_threshold_m3
+),
+
+-- Production rows linked to canonical operator_id via wells.operator_code.
+-- AB joins on wells.uwi; SK production uses normalized_uwi (uwi is null in
+-- some SK rows). We union both paths and dedupe by (uwi, productionmonth).
+operator_prod_linked AS MATERIALIZED (
+    SELECT DISTINCT
+        p.uwi,
+        p.productionmonth,
+        p.oil_prod_vol,
+        ol.operator_id
+    FROM production p
+    JOIN wells w
+      ON w.uwi = p.uwi
+    JOIN operator_lookup_exact ol
+      ON ol.identifier_kind IN ('ab_ba_code_5', 'ab_ba_code_4')
+     AND ol.identifier_value = UPPER(TRIM(w.operator_code))
+    WHERE p.oil_prod_vol IS NOT NULL
+      AND p.oil_prod_vol > 0
+      AND w.operator_code IS NOT NULL
+),
+
+operator_prod_bounds AS (
+    SELECT
+        MAX(CAST(productionmonth || '-01' AS DATE)) AS max_pmd
+    FROM operator_prod_linked
+),
+
+operator_prod_trailing12 AS (
+    SELECT
+        opl.operator_id,
+        ROUND(SUM(opl.oil_prod_vol) / 12.0, 2) AS avg_monthly_oil_m3
+    FROM operator_prod_linked opl
+    CROSS JOIN operator_prod_bounds b
+    WHERE CAST(opl.productionmonth || '-01' AS DATE) >= b.max_pmd - INTERVAL 12 MONTH
+    GROUP BY opl.operator_id
+),
+
+operator_first_oil_from_ctx AS (
+    -- Per-operator first oil month, computed from wells currently visible in
+    -- the opportunity radar. NOTE: we do NOT use MIN(production.productionmonth)
+    -- because the production table only spans 2024-03 onward in the live
+    -- warehouse — that floor would mis-flag every long-tenured operator as
+    -- "first oil 2024-03". Using opportunity_context.first_oil_month captures
+    -- the per-well first-oil signal which is the practical "new entrant"
+    -- semantic the spotlight needs.
+    SELECT
+        ro.operator_id,
+        MIN(oc.first_oil_month) AS operator_first_oil_month
+    FROM resolved_operator ro
+    JOIN opportunity_context oc ON oc.opportunity_id = ro.opportunity_id
+    WHERE ro.operator_id IS NOT NULL
+      AND oc.first_oil_month IS NOT NULL
+    GROUP BY ro.operator_id
+),
+
+operator_enrichment AS (
+    -- One row per operator_id with size-tier + new-operator flag.
+    -- Anchored to MAX(productionmonth) (not CURRENT_DATE) because
+    -- Petrinex production lags ~2 months.
+    SELECT
+        COALESCE(t.operator_id, fa.operator_id) AS operator_id,
+        COALESCE(t.avg_monthly_oil_m3, 0.0)     AS avg_monthly_oil_m3,
+        CASE
+            WHEN COALESCE(t.avg_monthly_oil_m3, 0.0) >= tp.lower_priority_threshold_m3
+                THEN 'lower_priority'
+            ELSE 'priority'
+        END AS operator_size_tier,
+        fa.operator_first_oil_month,
+        CASE
+            WHEN fa.operator_first_oil_month IS NOT NULL
+             AND fa.operator_first_oil_month >= b.max_pmd - INTERVAL 12 MONTH
+            THEN TRUE
+            ELSE FALSE
+        END AS is_new_operator
+    FROM operator_first_oil_from_ctx fa
+    FULL OUTER JOIN operator_prod_trailing12 t
+      ON t.operator_id = fa.operator_id
+    CROSS JOIN tier_params tp
+    CROSS JOIN operator_prod_bounds b
 )
 
 SELECT
@@ -1227,11 +1373,23 @@ SELECT
     oc.crude_hub_reach,
     oc.centroid_lat,
     oc.centroid_lon,
+
+    -- Phase 1 additions: operator size tier + well proximity to TEMI facilities.
+    oe.operator_size_tier,
+    oe.avg_monthly_oil_m3,
+    oe.is_new_operator,
+    oe.operator_first_oil_month,
+    wp.nearest_facility_id,
+    wp.distance_km,
+    COALESCE(wp.proximity_bucket, 'unknown') AS proximity_bucket,
+
     sr.primary_source_detail
 FROM signal_rollup sr
 CROSS JOIN params p
 JOIN opportunity_context oc ON oc.opportunity_id = sr.opportunity_id
 LEFT JOIN resolved_operator ro ON ro.opportunity_id = oc.opportunity_id
+LEFT JOIN operator_enrichment oe ON oe.operator_id = ro.operator_id
+LEFT JOIN well_proximity wp ON wp.uwi = oc.uwi
 ORDER BY
     sr.primary_priority DESC,
     sr.latest_signal_date DESC,

@@ -196,7 +196,14 @@ SELECT
     latest_gas_e3m3,
     latest_water_m3,
     centroid_lat,
-    centroid_lon
+    centroid_lon,
+    operator_size_tier,
+    avg_monthly_oil_m3,
+    is_new_operator,
+    operator_first_oil_month,
+    nearest_facility_id,
+    distance_km,
+    proximity_bucket
 FROM new_crude_lifecycle_timeline
 WHERE primary_signal IN (
     'CONFIDENTIAL_RELEASE',
@@ -336,6 +343,13 @@ SELECT
     crude_terminal_status,
     nearest_hub_id,
     hops_to_nearest_hub,
+    operator_size_tier,
+    avg_monthly_oil_m3,
+    is_new_operator,
+    operator_first_oil_month,
+    nearest_facility_id,
+    distance_km,
+    proximity_bucket,
     primary_source_detail
 FROM new_crude_lifecycle_timeline
 WHERE primary_signal IN (
@@ -397,6 +411,33 @@ SELECT
 FROM monthly_rollup
 ORDER BY production_report_month DESC, monthly_operator_rank;
 
+CREATE OR REPLACE VIEW new_crude_new_operator_spotlight AS
+SELECT
+    operator_id,
+    display_operator,
+    operator_short_name,
+    operator_size_tier,
+    avg_monthly_oil_m3,
+    operator_first_oil_month,
+    COUNT(*) AS opportunity_count,
+    SUM(well_count) AS represented_wells,
+    COUNT(*) FILTER (WHERE sales_section = '1_CALL_NOW_PRE_VOLUME') AS call_now_pre_volume_count,
+    COUNT(*) FILTER (WHERE sales_section = '2_CONFIRMED_NEW_CRUDE') AS confirmed_new_crude_count,
+    COUNT(*) FILTER (WHERE sales_section = '4_WATCHLIST') AS watchlist_count,
+    COUNT(*) FILTER (WHERE opportunity_type = 'BATTERY') AS battery_opportunity_count,
+    STRING_AGG(DISTINCT province, ', ' ORDER BY province) AS provinces,
+    STRING_AGG(DISTINCT primary_signal, ', ' ORDER BY primary_signal) AS signal_mix,
+    MAX(latest_signal_date) AS latest_signal_date,
+    SUM(COALESCE(latest_oil_m3, 0)) AS latest_oil_m3_sum
+FROM new_crude_weekly_contact_queue
+WHERE is_new_operator = TRUE
+GROUP BY operator_id, display_operator, operator_short_name,
+         operator_size_tier, avg_monthly_oil_m3, operator_first_oil_month
+ORDER BY operator_first_oil_month DESC NULLS LAST,
+         confirmed_new_crude_count DESC,
+         call_now_pre_volume_count DESC,
+         opportunity_count DESC;
+
 CREATE OR REPLACE VIEW new_crude_report_sheet_manifest AS
 SELECT *
 FROM (
@@ -405,5 +446,6 @@ FROM (
         ('weekly_operator_summary', 'new_crude_operator_weekly_summary', 'Operator rollup for weekly prioritization.'),
         ('monthly_confirmed_report', 'new_crude_monthly_confirmed_report', 'Production-backed monthly report.'),
         ('monthly_operator_summary', 'new_crude_operator_monthly_summary', 'Operator rollup for monthly confirmed production.'),
-        ('lifecycle_timeline', 'new_crude_lifecycle_timeline', 'Full derived lifecycle fields for debugging and product integration.')
+        ('lifecycle_timeline', 'new_crude_lifecycle_timeline', 'Full derived lifecycle fields for debugging and product integration.'),
+        ('new_operator_spotlight', 'new_crude_new_operator_spotlight', 'Operators whose first oil is within the trailing 12 months. New entrants worth proactive outreach.')
 ) AS t(sheet_name, view_name, description);

@@ -14,6 +14,7 @@ import pandas as pd
 REPORT_SHEETS: list[tuple[str, str]] = [
     ("weekly_contact_queue", "new_crude_weekly_contact_queue"),
     ("weekly_operator_summary", "new_crude_operator_weekly_summary"),
+    ("new_operator_spotlight", "new_crude_new_operator_spotlight"),
     ("monthly_confirmed", "new_crude_monthly_confirmed_report"),
     ("monthly_operator_summary", "new_crude_operator_monthly_summary"),
     ("lifecycle_timeline", "new_crude_lifecycle_timeline"),
