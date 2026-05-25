@@ -237,7 +237,7 @@ Sort by priority, then latest signal date, then latest oil volume.
 For the weekly contact queue, use sales sections rather than raw signal ranking:
 
 1. `1_CALL_NOW_PRE_VOLUME`: `CONFIDENTIAL_RELEASE`, `ACTIVE_CRUDE_STATUS`, `SPUD_CRUDE_LIKELY` before first oil.
-2. `2_CONFIRMED_NEW_CRUDE`: `NEW_BATTERY_FIRST_OIL`, `FIRST_CONFIRMED_OIL`.
+2. `2_CONFIRMED_NEW_CRUDE`: `NEW_BATTERY_FIRST_OIL`, `FIRST_CONFIRMED_OIL`, plus recent high-value status/release/spud signals that already have first oil.
 3. `3_RESEARCH_QUEUE`: `LICENCE_OIL`.
 4. `4_WATCHLIST`: `SPUD_UNKNOWN_FLUID`.
 5. `5_PRODUCTION_MOMENTUM`: restart and step-change rows, kept out of the default new-well queue.

@@ -17,6 +17,9 @@ SELECT
         THEN '1_CALL_NOW_PRE_VOLUME'
         WHEN primary_signal IN ('NEW_BATTERY_FIRST_OIL', 'FIRST_CONFIRMED_OIL')
         THEN '2_CONFIRMED_NEW_CRUDE'
+        WHEN primary_signal IN ('ACTIVE_CRUDE_STATUS', 'CONFIDENTIAL_RELEASE', 'SPUD_CRUDE_LIKELY')
+             AND first_oil_month IS NOT NULL
+        THEN '2_CONFIRMED_NEW_CRUDE'
         WHEN primary_signal = 'LICENCE_OIL'
         THEN '3_RESEARCH_QUEUE'
         WHEN primary_signal = 'SPUD_UNKNOWN_FLUID'
@@ -43,6 +46,9 @@ SELECT
         THEN 'CALL_NOW'
         WHEN primary_signal IN ('NEW_BATTERY_FIRST_OIL', 'FIRST_CONFIRMED_OIL')
         THEN 'CONFIRMED_FOLLOW_UP'
+        WHEN primary_signal IN ('CONFIDENTIAL_RELEASE', 'ACTIVE_CRUDE_STATUS', 'SPUD_CRUDE_LIKELY')
+             AND first_oil_month IS NOT NULL
+        THEN 'CONFIRMED_FOLLOW_UP'
         WHEN primary_signal = 'LICENCE_OIL'
         THEN 'RESEARCH_QUEUE'
         WHEN primary_signal = 'SPUD_UNKNOWN_FLUID'
@@ -58,6 +64,9 @@ SELECT
         THEN 'First oil confirmed; contact operator with production-backed crude marketing offer.'
         WHEN primary_signal = 'CONFIDENTIAL_RELEASE'
         THEN 'Previously confidential well is newly visible; research and contact before monthly production confirms.'
+        WHEN primary_signal = 'ACTIVE_CRUDE_STATUS'
+             AND first_oil_month IS NOT NULL
+        THEN 'Active crude status is already production-backed; contact with latest volume and facility context.'
         WHEN primary_signal = 'ACTIVE_CRUDE_STATUS'
         THEN 'Well reached active crude status; contact before Petrinex monthly volume appears.'
         WHEN primary_signal = 'SPUD_CRUDE_LIKELY'
@@ -97,6 +106,8 @@ SELECT
         WHEN first_oil_month IS NULL AND licence_date IS NOT NULL
         THEN 'spud or drilling activity'
         WHEN primary_signal IN ('NEW_BATTERY_FIRST_OIL', 'FIRST_CONFIRMED_OIL')
+        THEN 'latest volume and facility path'
+        WHEN first_oil_month IS NOT NULL
         THEN 'latest volume and facility path'
         WHEN primary_signal IN ('PRODUCTION_RESTART', 'PRODUCTION_STEP_CHANGE')
         THEN 'sustained production trend'
