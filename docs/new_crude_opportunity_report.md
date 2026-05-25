@@ -143,10 +143,13 @@ month, collapse those wells into one `NEW_BATTERY_FIRST_OIL` opportunity.
 Trigger:
 
 ```sql
-linked_facility_sub_type IN ('322', '311', '341', '342', '344', '506')
+linked_facility_sub_type IN ('322', '341', '342', '344', '506')
 AND COUNT(DISTINCT uwi) >= 2
 GROUP BY linked_facility_id, first_oil_month
 ```
+
+Keep subtype `311` in the crude filter because it identifies crude single-well
+batteries, but do not use it for multiwell battery collapse.
 
 The battery row should include `wells_in_pad`, `well_count`, facility name,
 facility subtype description, facility operator, and crude reachability.
@@ -301,6 +304,14 @@ GROUP BY province;
 
 The draft SQL lives at `docs/sql/new_crude_opportunity_report.sql`. It is meant
 to be validated against the VPS DuckDB before it becomes application code.
+
+Run the repeatable VPS validation with:
+
+```bash
+python scripts/validate_new_crude_report.py \
+  --db /data/aer_data.duckdb \
+  --sql docs/sql/new_crude_opportunity_report.sql
+```
 
 ## Risks
 

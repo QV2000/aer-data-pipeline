@@ -33,6 +33,15 @@ crude_facility_subtypes(sub_type) AS (
         ('506')  -- In-Situ Oil Sands
 ),
 
+multiwell_crude_facility_subtypes(sub_type) AS (
+    VALUES
+        ('322'), -- Crude Oil Multiwell Proration Battery
+        ('341'), -- Crude Bitumen Multiwell Group
+        ('342'), -- Crude Bitumen Multiwell Proration
+        ('344'), -- In-Situ Oil Sands legacy code
+        ('506')  -- In-Situ Oil Sands
+),
+
 wells_base AS (
     SELECT
         uwi,
@@ -345,7 +354,7 @@ battery_first_oil_groups AS (
         SUM(forow.first_oil_m3) AS first_oil_m3
     FROM first_oil_rows forow
     JOIN well_attr wa ON wa.uwi = forow.uwi
-    JOIN crude_facility_subtypes cfs ON cfs.sub_type = wa.linked_facility_sub_type
+    JOIN multiwell_crude_facility_subtypes cfs ON cfs.sub_type = wa.linked_facility_sub_type
     CROSS JOIN params p
     WHERE forow.first_oil_month >= p.production_cutoff
       AND wa.linked_facility_id IS NOT NULL
