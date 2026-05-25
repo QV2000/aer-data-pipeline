@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="en">
+  <body style="margin:0; padding:0; background:#f4f6f8; color:#1f2933; font-family:Arial, Helvetica, sans-serif;">
+    <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="width:100%; background:#f4f6f8; margin:0; padding:24px 0;">
+      <tr>
+        <td align="center" style="padding:0 12px;">
+          <table role="presentation" width="640" cellspacing="0" cellpadding="0" style="width:100%; max-width:640px; background:#ffffff; border:1px solid #d9e2ec; border-radius:8px; overflow:hidden;">
+            <tr>
+              <td style="padding:24px 24px 18px 24px; border-bottom:1px solid #e5eaf0;">
+                <h1 style="margin:0 0 8px 0; font-size:24px; line-height:30px; color:#17212b; font-weight:700;">New crude confirmed — {{ month_label }}</h1>
+                <div style="font-size:14px; line-height:21px; color:#52606d;">
+                  {{ totals.operator_count }} operators &middot;
+                  {{ totals.well_first_oil }} new wells &middot;
+                  {{ totals.pad_first_oil }} new pads &middot;
+                  {{ totals.restarts }} restarts &middot;
+                  {{ totals.step_changes }} step changes
+                </div>
+              </td>
+            </tr>
+
+            {% if operators %}
+            {% for op in operators %}
+            <tr>
+              <td style="padding:14px 24px 16px 24px; border-top:1px solid #eef2f7;">
+                <table role="presentation" cellspacing="0" cellpadding="0" style="width:100%;">
+                  <tr>
+                    <td style="vertical-align:top;">
+                      <div style="font-size:16px; line-height:22px; color:#17212b; font-weight:700;">
+                        {{ op.display_operator or 'Unresolved operator' }}
+                      </div>
+                      <div style="font-size:13px; line-height:19px; color:#52606d; margin-top:2px;">
+                        {%- if op.provinces -%}{{ op.provinces }}{%- endif -%}
+                        {%- if op.represented_wells -%} &middot; {{ op.represented_wells }} wells in report{%- endif -%}
+                        {%- if op.latest_oil_m3_sum_fmt -%} &middot; {{ op.latest_oil_m3_sum_fmt }} reported{%- endif -%}
+                      </div>
+                    </td>
+                    <td align="right" style="vertical-align:top; font-size:12px; line-height:18px; color:#0b5cad; font-weight:700; white-space:nowrap;">
+                      {%- set badges = [] -%}
+                      {%- if op.new_battery_first_oil_count -%}{%- set _ = badges.append(op.new_battery_first_oil_count ~ ' new pad') -%}{%- endif -%}
+                      {%- if op.first_confirmed_oil_count -%}{%- set _ = badges.append(op.first_confirmed_oil_count ~ ' new well') -%}{%- endif -%}
+                      {%- if op.restart_count -%}{%- set _ = badges.append(op.restart_count ~ ' restart') -%}{%- endif -%}
+                      {%- if op.step_change_count -%}{%- set _ = badges.append(op.step_change_count ~ ' step change') -%}{%- endif -%}
+                      {{ badges | join(' · ') | safe }}
+                    </td>
+                  </tr>
+                </table>
+
+                {% if op.samples %}
+                <table role="presentation" cellspacing="0" cellpadding="0" style="width:100%; margin-top:10px;">
+                  {% for sample in op.samples %}
+                  <tr>
+                    <td style="vertical-align:top; padding:2px 0; font-size:13px; line-height:19px; color:#243b53;">
+                      <span style="color:#9fb3c8;">•</span>
+                      <span style="font-weight:700;">{{ sample.signal_label }}</span>
+                      <span style="color:#52606d;">&nbsp;·&nbsp;</span>
+                      <span style="font-family:Consolas, Menlo, monospace;">{{ sample.label }}</span>
+                      {%- if sample.detail %}
+                      <span style="color:#52606d;">&nbsp;·&nbsp;{{ sample.detail }}</span>
+                      {%- endif %}
+                    </td>
+                  </tr>
+                  {% endfor %}
+                </table>
+                {% endif %}
+              </td>
+            </tr>
+            {% endfor %}
+            {% else %}
+            <tr>
+              <td style="padding:28px 24px; font-size:14px; line-height:21px; color:#52606d;">
+                No new crude confirmed for {{ month_label }} yet — production data may still be loading from Petrinex.
+              </td>
+            </tr>
+            {% endif %}
+
+            <tr>
+              <td style="padding:22px 24px 24px 24px; border-top:1px solid #e5eaf0;">
+                <table role="presentation" cellspacing="0" cellpadding="0" style="width:100%;">
+                  <tr>
+                    <td style="font-size:13px; line-height:20px; color:#52606d;">Production month {{ month_label }}. Generated {{ as_of_label }}.</td>
+                    <td align="right" style="font-size:13px; line-height:20px;">
+                      <a href="{{ xlsx_url }}" style="color:#0b5cad; text-decoration:none; font-weight:700;">Download xlsx</a>
+                    </td>
+                  </tr>
+                </table>
+              </td>
+            </tr>
+          </table>
+        </td>
+      </tr>
+    </table>
+  </body>
+</html>
