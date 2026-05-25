@@ -444,6 +444,126 @@ WITH digest_params AS (
         CURRENT_DATE::DATE AS as_of_date,
         (CURRENT_DATE - INTERVAL 7 DAY)::DATE AS week_cutoff
 ),
+operator_lookup_for_digest AS MATERIALIZED (
+    SELECT
+        identifier_kind,
+        identifier_value,
+        operator_id
+    FROM (
+        SELECT
+            identifier_kind,
+            UPPER(TRIM(identifier_value)) AS identifier_value,
+            operator_id,
+            ROW_NUMBER() OVER (
+                PARTITION BY identifier_kind, UPPER(TRIM(identifier_value))
+                ORDER BY
+                    CASE confidence
+                        WHEN 'manual' THEN 4
+                        WHEN 'high' THEN 3
+                        WHEN 'medium' THEN 2
+                        WHEN 'low' THEN 1
+                        ELSE 0
+                    END DESC,
+                    operator_id
+            ) AS rn
+        FROM operators_resolved
+        WHERE identifier_kind IN ('ab_ba_code_5', 'ab_ba_code_4')
+          AND identifier_value IS NOT NULL
+          AND TRIM(identifier_value) != ''
+    )
+    WHERE rn = 1
+),
+operator_production_rows AS MATERIALIZED (
+    SELECT DISTINCT
+        p.uwi,
+        CASE
+            WHEN REGEXP_MATCHES(TRIM(CAST(p.productionmonth AS VARCHAR)), '^[0-9]{4}-[0-9]{2}-[0-9]{2}$') THEN
+                CAST(TRIM(CAST(p.productionmonth AS VARCHAR)) AS DATE)
+            WHEN REGEXP_MATCHES(TRIM(CAST(p.productionmonth AS VARCHAR)), '^[0-9]{4}-[0-9]{2}$') THEN
+                CAST(TRIM(CAST(p.productionmonth AS VARCHAR)) || '-01' AS DATE)
+            WHEN REGEXP_MATCHES(TRIM(CAST(p.productionmonth AS VARCHAR)), '^[0-9]{6}$') THEN
+                CAST(STRPTIME(TRIM(CAST(p.productionmonth AS VARCHAR)), '%Y%m') AS DATE)
+            WHEN TRY_CAST(TRIM(CAST(p.productionmonth AS VARCHAR)) AS DATE) IS NOT NULL THEN
+                DATE_TRUNC('month', TRY_CAST(TRIM(CAST(p.productionmonth AS VARCHAR)) AS DATE))::DATE
+            ELSE NULL
+        END AS prod_month,
+        COALESCE(p.oil_prod_vol, 0)::DOUBLE AS oil_m3,
+        ol.operator_id
+    FROM production_history p
+    JOIN wells w
+      ON w.uwi = p.uwi
+    JOIN operator_lookup_for_digest ol
+      ON ol.identifier_kind IN ('ab_ba_code_5', 'ab_ba_code_4')
+     AND ol.identifier_value = UPPER(TRIM(w.operator_code))
+    WHERE p.uwi IS NOT NULL
+      AND p.productionmonth IS NOT NULL
+      AND p.oil_prod_vol IS NOT NULL
+      AND p.oil_prod_vol > 0
+      AND w.operator_code IS NOT NULL
+),
+operator_production_bounds AS (
+    SELECT
+        MIN(prod_month) AS first_available_prod_month,
+        MAX(prod_month) AS latest_prod_month
+    FROM operator_production_rows
+    WHERE prod_month IS NOT NULL
+),
+operator_production_monthly AS (
+    SELECT
+        operator_id,
+        prod_month,
+        COUNT(DISTINCT uwi) AS active_well_count,
+        SUM(oil_m3) AS oil_m3
+    FROM operator_production_rows
+    WHERE prod_month IS NOT NULL
+      AND oil_m3 > 0
+    GROUP BY operator_id, prod_month
+),
+operator_first_production AS (
+    SELECT
+        operator_id,
+        MIN(prod_month) AS raw_first_oil_month
+    FROM operator_production_monthly
+    GROUP BY operator_id
+),
+operator_production_lag AS (
+    SELECT
+        opm.*,
+        LAG(opm.oil_m3, 1, 0) OVER (
+            PARTITION BY opm.operator_id
+            ORDER BY opm.prod_month
+        ) AS prior_month_oil_m3
+    FROM operator_production_monthly opm
+),
+operator_latest_production AS (
+    SELECT *
+    FROM (
+        SELECT
+            opl.*,
+            ROW_NUMBER() OVER (
+                PARTITION BY opl.operator_id
+                ORDER BY opl.prod_month DESC
+            ) AS rn
+        FROM operator_production_lag opl
+    )
+    WHERE rn = 1
+),
+operator_production_stats AS (
+    SELECT
+        olp.operator_id,
+        CASE
+            WHEN ofp.raw_first_oil_month > opb.first_available_prod_month
+            THEN ofp.raw_first_oil_month
+            ELSE NULL
+        END AS operator_first_oil_month,
+        olp.active_well_count AS well_count_active,
+        ROUND(olp.oil_m3, 1) AS last_month_oil_m3,
+        ROUND(olp.oil_m3 - COALESCE(olp.prior_month_oil_m3, 0), 1) AS mom_oil_delta_m3
+    FROM operator_latest_production olp
+    LEFT JOIN operator_first_production ofp
+      ON ofp.operator_id = olp.operator_id
+    CROSS JOIN operator_production_bounds opb
+),
 latest_production_mover_month AS (
     SELECT MAX(latest_signal_date) AS latest_signal_date
     FROM new_crude_lifecycle_timeline
@@ -462,6 +582,7 @@ actionable_events AS (
     CROSS JOIN digest_params dp
     WHERE new_crude_lifecycle_timeline.latest_signal_date >= dp.week_cutoff
       AND new_crude_lifecycle_timeline.latest_signal_date <= dp.as_of_date
+      AND new_crude_lifecycle_timeline.primary_signal != 'SPUD_UNKNOWN_FLUID'
       AND (
           operator_id IS NOT NULL
           OR NULLIF(TRIM(display_operator), '') IS NOT NULL
@@ -518,11 +639,14 @@ operator_rollup AS (
         STRING_AGG(DISTINCT province, ', ' ORDER BY province)
             FILTER (WHERE province IS NOT NULL) AS province,
         MAX(CASE WHEN is_new_operator THEN 1 ELSE 0 END) = 1 AS is_new_operator,
-        MAX(operator_first_oil_month) AS operator_first_oil_month,
+        MAX(operator_first_oil_month) AS radar_operator_first_oil_month,
         MIN(distance_km) AS min_distance_km,
-        COUNT(*) FILTER (WHERE digest_scope = 'weekly') AS signal_count_7d,
-        SUM(CASE WHEN COALESCE(latest_oil_m3, 0) > 0 THEN well_count ELSE 0 END) AS well_count_active,
-        SUM(COALESCE(latest_oil_m3, 0)) AS last_month_oil_m3,
+        COUNT(*) FILTER (
+            WHERE digest_scope = 'weekly'
+               OR primary_signal IN ('PRODUCTION_RESTART', 'PRODUCTION_STEP_CHANGE')
+        ) AS signal_count_7d,
+        SUM(CASE WHEN COALESCE(latest_oil_m3, 0) > 0 THEN well_count ELSE 0 END) AS opportunity_well_count_active,
+        SUM(COALESCE(latest_oil_m3, 0)) AS opportunity_last_month_oil_m3,
         MAX(CASE WHEN digest_scope = 'weekly' THEN 1 ELSE 0 END) = 1 AS has_weekly_activity,
         MAX(CASE
             WHEN primary_signal IN ('PRODUCTION_RESTART', 'PRODUCTION_STEP_CHANGE') THEN 1
@@ -537,31 +661,26 @@ operator_rollup AS (
             WHEN primary_signal IN ('PRODUCTION_RESTART', 'PRODUCTION_STEP_CHANGE')
             THEN COALESCE(NULLIF(latest_mom_oil_delta_m3, 0), latest_oil_m3, 0)
             ELSE 0
-        END) AS mom_oil_delta_m3
+        END) AS opportunity_mom_oil_delta_m3
     FROM digest_source
     GROUP BY operator_key
 ),
 category_rows AS (
-    SELECT *, 'new_operator' AS category
-    FROM operator_rollup
-    WHERE is_new_operator
-      AND has_weekly_activity
-    UNION ALL
-    SELECT *, 'near_facility' AS category
-    FROM operator_rollup
-    WHERE min_distance_km < 100
-      AND has_weekly_activity
-    UNION ALL
-    SELECT *, 'production_mover' AS category
-    FROM operator_rollup
-    WHERE has_production_mover
-    UNION ALL
-    SELECT *, 'other' AS category
-    FROM operator_rollup
-    WHERE has_weekly_activity
-      AND NOT COALESCE(is_new_operator, FALSE)
-      AND NOT COALESCE(min_distance_km < 100, FALSE)
-      AND NOT COALESCE(has_production_mover, FALSE)
+    SELECT *
+    FROM (
+        SELECT
+            *,
+            CASE
+                WHEN is_new_operator AND has_weekly_activity THEN 'new_operator'
+                WHEN min_distance_km < 100
+                 AND (has_weekly_activity OR has_production_mover) THEN 'near_facility'
+                WHEN has_production_mover THEN 'production_mover'
+                WHEN has_weekly_activity THEN 'other'
+                ELSE NULL
+            END AS category
+        FROM operator_rollup
+    )
+    WHERE category IS NOT NULL
 )
 SELECT
     r.operator_key,
@@ -570,20 +689,25 @@ SELECT
     r.operator_short_name,
     r.province,
     r.is_new_operator,
-    r.operator_first_oil_month,
+    COALESCE(
+        ps.operator_first_oil_month,
+        CASE WHEN r.is_new_operator THEN r.radar_operator_first_oil_month ELSE NULL END
+    ) AS operator_first_oil_month,
     n.nearest_facility_id,
     r.min_distance_km,
     r.signal_count_7d,
-    r.well_count_active,
-    ROUND(r.last_month_oil_m3, 1) AS last_month_oil_m3,
+    COALESCE(ps.well_count_active, r.opportunity_well_count_active, 0)::INTEGER AS well_count_active,
+    ROUND(COALESCE(ps.last_month_oil_m3, r.opportunity_last_month_oil_m3, 0), 1) AS last_month_oil_m3,
     r.category,
     r.has_production_mover,
     r.production_mover_signal_date,
-    ROUND(r.mom_oil_delta_m3, 1) AS mom_oil_delta_m3
+    ROUND(COALESCE(ps.mom_oil_delta_m3, r.opportunity_mom_oil_delta_m3, 0), 1) AS mom_oil_delta_m3
 FROM category_rows r
 LEFT JOIN operator_nearest n
   ON n.operator_key = r.operator_key
  AND n.rn = 1
+LEFT JOIN operator_production_stats ps
+  ON ps.operator_id = r.operator_id
 ORDER BY
     CASE
         WHEN category = 'new_operator' THEN 1
@@ -610,7 +734,41 @@ candidate_events AS (
         d.category,
         t.latest_signal_date AS event_date,
         t.primary_signal AS event_type,
-        COALESCE(t.primary_source_detail, t.sales_action, t.recommended_action, '') AS event_detail,
+        CASE
+            WHEN t.primary_signal = 'LICENCE_OIL'
+            THEN 'oil licence issued'
+            WHEN t.primary_signal = 'SPUD_CRUDE_LIKELY'
+            THEN 'spud, crude likely'
+            WHEN t.primary_signal = 'SPUD_UNKNOWN_FLUID'
+            THEN 'spud, fluid not yet classified'
+            WHEN t.primary_signal = 'ACTIVE_CRUDE_STATUS'
+            THEN 'status changed to active crude'
+            WHEN t.primary_signal = 'CONFIDENTIAL_RELEASE'
+            THEN 'confidentiality released'
+            WHEN t.primary_signal = 'FIRST_CONFIRMED_OIL'
+            THEN 'first oil produced (' || ROUND(COALESCE(t.latest_oil_m3, 0), 1)::VARCHAR || ' m3)'
+            WHEN t.primary_signal = 'NEW_BATTERY_FIRST_OIL'
+            THEN 'pad first oil produced (' || ROUND(COALESCE(t.latest_oil_m3, 0), 1)::VARCHAR || ' m3)'
+            WHEN t.primary_signal = 'PRODUCTION_RESTART'
+            THEN 'production restarted ('
+                || CASE
+                    WHEN COALESCE(NULLIF(t.latest_mom_oil_delta_m3, 0), d.mom_oil_delta_m3, t.latest_oil_m3, 0) >= 0
+                    THEN '+'
+                    ELSE ''
+                END
+                || ROUND(COALESCE(NULLIF(t.latest_mom_oil_delta_m3, 0), d.mom_oil_delta_m3, t.latest_oil_m3, 0), 1)::VARCHAR
+                || ' m3 MoM)'
+            WHEN t.primary_signal = 'PRODUCTION_STEP_CHANGE'
+            THEN 'production step change ('
+                || CASE
+                    WHEN COALESCE(NULLIF(t.latest_mom_oil_delta_m3, 0), d.mom_oil_delta_m3, t.latest_oil_m3, 0) >= 0
+                    THEN '+'
+                    ELSE ''
+                END
+                || ROUND(COALESCE(NULLIF(t.latest_mom_oil_delta_m3, 0), d.mom_oil_delta_m3, t.latest_oil_m3, 0), 1)::VARCHAR
+                || ' m3 MoM)'
+            ELSE COALESCE(t.primary_source_detail, '')
+        END AS event_detail,
         COALESCE(t.linked_facility_name, t.well_name, t.opportunity_id) AS well_or_battery_label,
         ROW_NUMBER() OVER (
             PARTITION BY d.operator_key, d.category
@@ -633,12 +791,21 @@ candidate_events AS (
          ) = d.operator_key
     CROSS JOIN digest_params dp
     WHERE d.category IN ('new_operator', 'near_facility', 'production_mover')
+      AND t.primary_signal != 'SPUD_UNKNOWN_FLUID'
       AND (
           d.category = 'new_operator'
           OR (
               d.category = 'near_facility'
-              AND t.latest_signal_date >= dp.week_cutoff
-              AND t.latest_signal_date <= dp.as_of_date
+              AND (
+                  (
+                      t.latest_signal_date >= dp.week_cutoff
+                      AND t.latest_signal_date <= dp.as_of_date
+                  )
+                  OR (
+                      t.primary_signal IN ('PRODUCTION_RESTART', 'PRODUCTION_STEP_CHANGE')
+                      AND t.latest_signal_date = d.production_mover_signal_date
+                  )
+              )
           )
           OR (
               d.category = 'production_mover'

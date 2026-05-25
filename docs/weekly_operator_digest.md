@@ -11,13 +11,12 @@ Run `docs/sql/new_crude_opportunity_report.sql` first, then
 
 | View | Grain | Purpose |
 | --- | --- | --- |
-| `weekly_operator_digest` | One row per operator/category | Section assignment, counts, distance, volume, and MoM movement. |
-| `weekly_operator_timeline` | Up to 1-3 rows per operator/category | Lifecycle snippets rendered inside each email card. |
+| `weekly_operator_digest` | One row per operator | Section assignment, counts, distance, volume, and MoM movement. |
+| `weekly_operator_timeline` | Up to 1-3 rows per operator | Lifecycle snippets rendered inside each email card. |
 
-Digest categories are not mutually exclusive. If an operator has new activity
-near a TEMI facility and also has a production movement, the operator can appear
-in both sections. This keeps the production-mover section meaningful instead of
-hiding those operators behind facility proximity.
+Digest categories are exclusive. Proximity wins ahead of production movement so
+the near-facility section stays the primary rep workflow when an operator is
+inside the TEMI radius.
 
 Category rules:
 
@@ -29,6 +28,16 @@ Category rules:
 Rows without an operator id or displayable operator name are filtered out before
 aggregation. They are not actionable in a rep email and should be handled as a
 data-quality follow-up, not as "Unresolved operator" cards.
+
+`SPUD_UNKNOWN_FLUID` is excluded from the digest by default. It remains available
+in the workbook watchlist, but it is too low-confidence for the weekly operator
+email unless it is later promoted into an explicit watchlist section.
+
+Operator production stats in the digest come from `production_history` joined to
+canonical operators through the well operator BA code, not from the weekly
+opportunity rows. `operator_first_oil_month` is suppressed when it equals the
+warehouse retention floor, so established operators do not all display the same
+artificial first month.
 
 The HTML email renders only `new_operator`, `near_facility`, and
 `production_mover`. The `other` category remains queryable in
