@@ -38,6 +38,10 @@ canonical operators through the well operator BA code, not from the weekly
 opportunity rows. Cards do not show company-level first oil month because that
 is misleading for established producers.
 
+The digest excludes operators at or above 50,000 m3/month, using either latest
+month oil or trailing 12-month average. Those large producers belong in
+account/market monitoring, not the rep-facing new-crude opportunity email.
+
 Each card includes the nearest TEMI facility name and distance, plus up to three
 lifecycle events expanded from the opportunity row dates: licence, spud, active
 crude status, confidentiality release, first oil, and production movement.

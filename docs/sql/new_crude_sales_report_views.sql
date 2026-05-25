@@ -543,6 +543,15 @@ operator_production_lag AS (
         ) AS prior_month_oil_m3
     FROM operator_production_monthly opm
 ),
+operator_production_trailing12 AS (
+    SELECT
+        opm.operator_id,
+        ROUND(SUM(opm.oil_m3) / 12.0, 1) AS avg_monthly_oil_m3
+    FROM operator_production_monthly opm
+    CROSS JOIN operator_production_bounds opb
+    WHERE opm.prod_month >= opb.latest_prod_month - INTERVAL 12 MONTH
+    GROUP BY opm.operator_id
+),
 operator_latest_production AS (
     SELECT *
     FROM (
@@ -566,10 +575,13 @@ operator_production_stats AS (
         END AS operator_first_oil_month,
         olp.active_well_count AS well_count_active,
         ROUND(olp.oil_m3, 1) AS last_month_oil_m3,
-        ROUND(olp.oil_m3 - COALESCE(olp.prior_month_oil_m3, 0), 1) AS mom_oil_delta_m3
+        ROUND(olp.oil_m3 - COALESCE(olp.prior_month_oil_m3, 0), 1) AS mom_oil_delta_m3,
+        COALESCE(t12.avg_monthly_oil_m3, 0) AS avg_monthly_oil_m3
     FROM operator_latest_production olp
     LEFT JOIN operator_first_production ofp
       ON ofp.operator_id = olp.operator_id
+    LEFT JOIN operator_production_trailing12 t12
+      ON t12.operator_id = olp.operator_id
     CROSS JOIN operator_production_bounds opb
 ),
 latest_production_mover_month AS (
@@ -648,6 +660,7 @@ operator_rollup AS (
             FILTER (WHERE province IS NOT NULL) AS province,
         MAX(CASE WHEN is_new_operator THEN 1 ELSE 0 END) = 1 AS is_new_operator,
         MAX(operator_first_oil_month) AS radar_operator_first_oil_month,
+        MAX(avg_monthly_oil_m3) AS radar_avg_monthly_oil_m3,
         MIN(distance_km) AS min_distance_km,
         COUNT(*) FILTER (
             WHERE digest_scope = 'weekly'
@@ -719,6 +732,8 @@ LEFT JOIN temi_facility_names tfn
   ON tfn.facility_id = n.nearest_facility_id
 LEFT JOIN operator_production_stats ps
   ON ps.operator_id = r.operator_id
+WHERE COALESCE(ps.avg_monthly_oil_m3, r.radar_avg_monthly_oil_m3, 0) < 50000
+  AND COALESCE(ps.last_month_oil_m3, r.opportunity_last_month_oil_m3, 0) < 50000
 ORDER BY
     CASE
         WHEN category = 'new_operator' THEN 1
