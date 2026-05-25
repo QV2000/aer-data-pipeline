@@ -47,20 +47,22 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--write",
         action="store_true",
-        help="Create persistent DuckDB views instead of temporary session views.",
+        help="Create persistent DuckDB report objects instead of temporary session objects.",
     )
     return parser.parse_args()
 
 
-def load_sql(path: Path, *, persistent: bool) -> str:
+def load_sql(path: Path, *, persistent: bool, materialize: bool = False) -> str:
     sql = path.read_text(encoding="utf-8")
     sql = sql.split("-- Validation checks to run after creating the view:")[0].strip()
     if persistent:
-        return sql
+        replacement = "CREATE OR REPLACE TABLE " if materialize else "CREATE OR REPLACE VIEW "
+    else:
+        replacement = "CREATE OR REPLACE TEMP TABLE " if materialize else "CREATE OR REPLACE TEMP VIEW "
 
     return re.sub(
         r"CREATE\s+OR\s+REPLACE\s+VIEW\s+",
-        "CREATE OR REPLACE TEMP VIEW ",
+        replacement,
         sql,
         flags=re.IGNORECASE,
     )
@@ -120,8 +122,13 @@ def main() -> int:
 
     conn = duckdb.connect(str(db_path), read_only=not args.write)
     try:
+        print("Building new_crude_opportunity_report view...", flush=True)
         conn.execute(load_sql(opportunity_sql_path, persistent=args.write))
-        conn.execute(load_sql(derived_sql_path, persistent=args.write))
+
+        print("Materializing derived report tables...", flush=True)
+        conn.execute(load_sql(derived_sql_path, persistent=args.write, materialize=True))
+
+        print(f"Writing workbook: {output_path}", flush=True)
         row_counts = write_workbook(conn, output_path)
     finally:
         conn.close()

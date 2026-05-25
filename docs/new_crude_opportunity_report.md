@@ -431,6 +431,11 @@ python scripts/export_new_crude_reports.py \
   --out reports/new_crude_reports.xlsx
 ```
 
+The export script materializes the derived lifecycle and sheet objects as
+temporary tables in the DuckDB session. This is intentional: the base
+opportunity report is expensive, and keeping all five workbook sheets as chained
+views would re-run that base report multiple times.
+
 The workbook sheets are:
 
 - `weekly_contact_queue`
