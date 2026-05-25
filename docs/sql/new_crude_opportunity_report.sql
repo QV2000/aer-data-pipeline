@@ -69,9 +69,26 @@ wells_base AS (
     LEFT JOIN well_coords wcg ON wcg.uwi = wc.uwi
 ),
 
-well_attr AS (
+well_attr_source AS (
     SELECT
-        uwi,
+        CASE
+            WHEN LOWER(TRIM(CAST(uwi AS VARCHAR))) IN ('', 'nan', 'none') THEN NULL
+            ELSE TRIM(CAST(uwi AS VARCHAR))
+        END AS source_uwi,
+        CASE
+            WHEN LOWER(TRIM(CAST(well_id AS VARCHAR))) IN ('', 'nan', 'none') THEN NULL
+            ELSE TRIM(CAST(well_id AS VARCHAR))
+        END AS well_id,
+        REGEXP_REPLACE(
+            UPPER(
+                CASE
+                    WHEN LOWER(TRIM(CAST(well_id AS VARCHAR))) IN ('', 'nan', 'none') THEN NULL
+                    ELSE TRIM(CAST(well_id AS VARCHAR))
+                END
+            ),
+            '^(ABWI|SKWI)',
+            ''
+        ) AS compact_well_id,
         field,
         field_name,
         pool_deposit,
@@ -94,6 +111,65 @@ well_attr AS (
         NULLIF(TRIM(linked_facility_identifier), '') AS linked_facility_identifier,
         CAST(linked_start_date AS DATE) AS linked_start_date
     FROM well_attributes
+),
+
+well_attr_keyed AS (
+    SELECT
+        COALESCE(
+            source_uwi,
+            CASE
+                WHEN REGEXP_MATCHES(compact_well_id, '^[0-9]{12}W[1-6][0-9]{2}$') THEN
+                    SUBSTR(compact_well_id, 2, 2) || '/' ||
+                    SUBSTR(compact_well_id, 4, 2) || '-' ||
+                    SUBSTR(compact_well_id, 6, 2) || '-' ||
+                    SUBSTR(compact_well_id, 8, 3) || '-' ||
+                    SUBSTR(compact_well_id, 11, 2) ||
+                    SUBSTR(compact_well_id, 13, 2) || '/' ||
+                    CAST(CAST(SUBSTR(compact_well_id, 15, 2) AS INTEGER) AS VARCHAR)
+                ELSE NULL
+            END
+        ) AS uwi,
+        well_id,
+        field,
+        field_name,
+        pool_deposit,
+        formation,
+        horizontal_drill,
+        finished_drill_date,
+        attribute_spud_date,
+        licence_status_date,
+        well_status_date,
+        well_status_fluid,
+        well_status_mode,
+        linked_facility_id,
+        linked_facility_type,
+        linked_facility_sub_type,
+        linked_facility_sub_type_desc,
+        linked_facility_name,
+        linked_facility_operator_baid,
+        linked_facility_operator_legal_name,
+        linked_facility_province_state,
+        linked_facility_identifier,
+        linked_start_date
+    FROM well_attr_source
+),
+
+well_attr AS (
+    SELECT * EXCLUDE (rn)
+    FROM (
+        SELECT
+            wak.*,
+            ROW_NUMBER() OVER (
+                PARTITION BY wak.uwi
+                ORDER BY
+                    (wak.linked_facility_id IS NOT NULL) DESC,
+                    wak.linked_start_date DESC NULLS LAST,
+                    wak.well_id
+            ) AS rn
+        FROM well_attr_keyed wak
+        WHERE wak.uwi IS NOT NULL
+    )
+    WHERE rn = 1
 ),
 
 facility_reach AS (
@@ -311,14 +387,34 @@ release_context AS (
     GROUP BY re.uwi
 ),
 
+well_keys AS (
+    SELECT uwi FROM wells_base WHERE uwi IS NOT NULL
+    UNION
+    SELECT uwi FROM well_attr WHERE uwi IS NOT NULL
+    UNION
+    SELECT uwi FROM latest_licence WHERE uwi IS NOT NULL
+    UNION
+    SELECT uwi FROM licence_context WHERE uwi IS NOT NULL
+    UNION
+    SELECT uwi FROM spud_context WHERE uwi IS NOT NULL
+    UNION
+    SELECT uwi FROM status_context WHERE uwi IS NOT NULL
+    UNION
+    SELECT uwi FROM release_context WHERE uwi IS NOT NULL
+    UNION
+    SELECT uwi FROM first_oil WHERE uwi IS NOT NULL
+    UNION
+    SELECT uwi FROM latest_prod WHERE uwi IS NOT NULL
+),
+
 well_context AS (
     SELECT
-        'WELL:' || wb.uwi AS opportunity_id,
+        'WELL:' || wk.uwi AS opportunity_id,
         'WELL' AS opportunity_type,
-        wb.uwi,
-        wb.uwi AS wells_in_pad,
+        wk.uwi,
+        wk.uwi AS wells_in_pad,
         1 AS well_count,
-        COALESCE(wb.well_name, ll.well_name, wb.uwi) AS well_name,
+        COALESCE(wb.well_name, ll.well_name, wk.uwi) AS well_name,
         wb.raw_operator AS well_licensee,
         COALESCE(wa.linked_facility_operator_legal_name, fc.facility_operator_name, wb.raw_operator, ll.licensee) AS display_operator,
         COALESCE(wb.raw_operator, ll.licensee) AS raw_operator,
@@ -371,15 +467,16 @@ well_context AS (
         END AS crude_hub_reach,
         COALESCE(wb.centroid_lat, fc.facility_lat) AS centroid_lat,
         COALESCE(wb.centroid_lon, fc.facility_lon) AS centroid_lon
-    FROM wells_base wb
-    LEFT JOIN well_attr wa ON wa.uwi = wb.uwi
-    LEFT JOIN latest_licence ll ON ll.uwi = wb.uwi
-    LEFT JOIN licence_context lc ON lc.uwi = wb.uwi
-    LEFT JOIN spud_context spc ON spc.uwi = wb.uwi
-    LEFT JOIN status_context stc ON stc.uwi = wb.uwi
-    LEFT JOIN release_context rc ON rc.uwi = wb.uwi
-    LEFT JOIN first_oil fo ON fo.uwi = wb.uwi
-    LEFT JOIN latest_prod lp ON lp.uwi = wb.uwi
+    FROM well_keys wk
+    LEFT JOIN wells_base wb ON wb.uwi = wk.uwi
+    LEFT JOIN well_attr wa ON wa.uwi = wk.uwi
+    LEFT JOIN latest_licence ll ON ll.uwi = wk.uwi
+    LEFT JOIN licence_context lc ON lc.uwi = wk.uwi
+    LEFT JOIN spud_context spc ON spc.uwi = wk.uwi
+    LEFT JOIN status_context stc ON stc.uwi = wk.uwi
+    LEFT JOIN release_context rc ON rc.uwi = wk.uwi
+    LEFT JOIN first_oil fo ON fo.uwi = wk.uwi
+    LEFT JOIN latest_prod lp ON lp.uwi = wk.uwi
     LEFT JOIN facility_reach fr ON fr.facility_id = wa.linked_facility_id
     LEFT JOIN facility_context fc ON fc.facility_id = wa.linked_facility_id
 ),

@@ -482,6 +482,32 @@ def format_petrinex_uwi(raw_uwi: str) -> str:
 
     return f"{loc_fmt}/{lsd}-{sec}-{twp}-{rg}{mer}/{evt_fmt}"
 
+
+def _populate_uwi_from_petrinex_well_id(df: pd.DataFrame) -> pd.DataFrame:
+    """Populate missing display UWIs from Petrinex ABWI/SKWI well IDs."""
+    if 'well_id' not in df.columns:
+        return df
+
+    if 'uwi' not in df.columns:
+        df['uwi'] = None
+
+    missing_uwi = (
+        df['uwi'].isna()
+        | df['uwi'].astype(str).str.strip().isin(['', 'nan', 'None', 'NaN'])
+    )
+    has_well_id = (
+        df['well_id'].notna()
+        & ~df['well_id'].astype(str).str.strip().isin(['', 'nan', 'None', 'NaN'])
+    )
+    fill_mask = missing_uwi & has_well_id
+
+    if fill_mask.any():
+        df.loc[fill_mask, 'uwi'] = df.loc[fill_mask, 'well_id'].astype(str).apply(format_petrinex_uwi)
+        logger.info(f"Populated {fill_mask.sum()} missing UWIs from Petrinex well_id")
+
+    return df
+
+
 def _build_production_month_df(df: pd.DataFrame) -> pd.DataFrame:
     """
     Convert a single-month Petrinex bronze dataframe into the production silver schema.
@@ -1119,7 +1145,11 @@ def build_well_attributes_table(
             df[col] = pd.to_datetime(df[col], format='%Y%m%d', errors='coerce')
 
     # TRIM all join keys to ensure reliable joins
-    df = _trim_join_keys(df, ['uwi', 'uwi_id', 'licence_no', 'licensee_code', 'field_code', 'pool_code', 'cwi'])
+    df = _trim_join_keys(
+        df,
+        ['uwi', 'well_id', 'well_identifier', 'uwi_id', 'licence_no', 'licensee_code', 'field_code', 'pool_code', 'cwi'],
+    )
+    df = _populate_uwi_from_petrinex_well_id(df)
 
     df = df.drop(columns=['_snapshot_date', '_source_id'], errors='ignore')
     df['_silver_version'] = pd.Timestamp.now().isoformat()
@@ -1198,6 +1228,11 @@ def build_wells_table(
     # Ensure province column exists
     if 'province' not in df.columns:
         df['province'] = 'AB'
+
+    # SK Petrinex wells often have well_id populated but uwi blank. Populate
+    # before deduplication so all SK wells do not collapse under NULL UWI.
+    df = _trim_join_keys(df, ['uwi', 'well_id', 'well_identifier', 'licence_no', 'licensee_code', 'cwi'])
+    df = _populate_uwi_from_petrinex_well_id(df)
 
     # Deduplicate by uwi + province (keep latest snapshot)
     if '_snapshot_date' in df.columns:

@@ -199,13 +199,19 @@ Sort by priority, then latest signal date, then latest oil volume.
 Do not parse coordinates from UWI in the report. Use stored coordinates from the
 warehouse:
 
-1. `wells_current.centroid_lat/lon`
+1. `wells.centroid_lat/lon` for the live warehouse coordinate view
 2. `dls_centroids` for AB fallback
 3. `sk_section_centroids` for SK fallback
 
 SK should stay in scope. Current SK signals are strongest from SK Petrinex,
 daily drilling, well bulletin, production, and facilities. AB status changes
 are richer because AER ST2 is AB-specific.
+
+For the live warehouse, SK production uses display UWIs like
+`01/01-01-001-12W2/0`, while SK well attributes may only carry Petrinex
+`well_id` values like `SKWI101010100112W200`. The report SQL derives the
+display UWI from `well_id` before joining, and the silver build should populate
+missing SK `uwi` values from `well_id` before deduplication on future rebuilds.
 
 BC should be shown only if rows have a reliable province, coordinates, and
 production/licence/spud signals in the warehouse. Otherwise label as unsupported
@@ -324,7 +330,8 @@ Petrinex reporting lags field activity.
 - A stateless weekly query will repeat production-month signals until the
   production window closes. If reps need "never sent before," add a sent-log or
   compare against the prior report output.
-- SK UWI/CWI normalization must be verified against production joins.
+- SK UWI/CWI normalization must stay covered by validation because it controls
+  production-to-facility linkage and battery collapse.
 - `oil_prod_vol > 0` may be too sensitive; start with `>= 1.0 m3`, then tune.
 - Confidential release dates may be scheduled release dates rather than the
   first day reps can practically act.

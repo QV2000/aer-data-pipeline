@@ -33,6 +33,7 @@ REQUIRED_TABLES: dict[str, set[str]] = {
     },
     "well_attributes": {
         "uwi",
+        "well_id",
         "field",
         "field_name",
         "pool_deposit",
@@ -288,6 +289,60 @@ def run_report(conn: duckdb.DuckDBPyConnection, sql: str, sample_limit: int) -> 
                 SELECT MAX(prod_month) AS latest_production_month
                 FROM production_clean
             ),
+            well_attr_source AS (
+                SELECT
+                    CASE
+                        WHEN LOWER(TRIM(CAST(uwi AS VARCHAR))) IN ('', 'nan', 'none') THEN NULL
+                        ELSE TRIM(CAST(uwi AS VARCHAR))
+                    END AS source_uwi,
+                    REGEXP_REPLACE(
+                        UPPER(
+                            CASE
+                                WHEN LOWER(TRIM(CAST(well_id AS VARCHAR))) IN ('', 'nan', 'none') THEN NULL
+                                ELSE TRIM(CAST(well_id AS VARCHAR))
+                            END
+                        ),
+                        '^(ABWI|SKWI)',
+                        ''
+                    ) AS compact_well_id,
+                    linked_facility_id,
+                    linked_facility_sub_type
+                FROM well_attributes
+            ),
+            well_attr_keyed AS (
+                SELECT
+                    COALESCE(
+                        source_uwi,
+                        CASE
+                            WHEN REGEXP_MATCHES(compact_well_id, '^[0-9]{12}W[1-6][0-9]{2}$') THEN
+                                SUBSTR(compact_well_id, 2, 2) || '/' ||
+                                SUBSTR(compact_well_id, 4, 2) || '-' ||
+                                SUBSTR(compact_well_id, 6, 2) || '-' ||
+                                SUBSTR(compact_well_id, 8, 3) || '-' ||
+                                SUBSTR(compact_well_id, 11, 2) ||
+                                SUBSTR(compact_well_id, 13, 2) || '/' ||
+                                CAST(CAST(SUBSTR(compact_well_id, 15, 2) AS INTEGER) AS VARCHAR)
+                            ELSE NULL
+                        END
+                    ) AS uwi,
+                    linked_facility_id,
+                    linked_facility_sub_type
+                FROM well_attr_source
+            ),
+            well_attr AS (
+                SELECT uwi, linked_facility_id, linked_facility_sub_type
+                FROM (
+                    SELECT
+                        wak.*,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY wak.uwi
+                            ORDER BY (wak.linked_facility_id IS NOT NULL) DESC
+                        ) AS rn
+                    FROM well_attr_keyed wak
+                    WHERE wak.uwi IS NOT NULL
+                )
+                WHERE rn = 1
+            ),
             first_oil AS (
                 SELECT uwi, MIN(prod_month) AS first_oil_month
                 FROM production_clean
@@ -304,7 +359,7 @@ def run_report(conn: duckdb.DuckDBPyConnection, sql: str, sample_limit: int) -> 
                        WHERE wa.linked_facility_sub_type IN ('322','341','342','344','506')
                    ) AS multiwell_crude_facility_linked
             FROM first_oil fo
-            LEFT JOIN well_attributes wa USING (uwi)
+            LEFT JOIN well_attr wa USING (uwi)
             WHERE fo.first_oil_month >= (
                 SELECT latest_production_month - INTERVAL 5 MONTH
                 FROM production_bounds
@@ -348,6 +403,60 @@ def run_report(conn: duckdb.DuckDBPyConnection, sql: str, sample_limit: int) -> 
                 WHERE oil_prod_vol >= 1.0
                   AND prod_month IS NOT NULL
                 GROUP BY uwi
+            ),
+            well_attr_source AS (
+                SELECT
+                    CASE
+                        WHEN LOWER(TRIM(CAST(uwi AS VARCHAR))) IN ('', 'nan', 'none') THEN NULL
+                        ELSE TRIM(CAST(uwi AS VARCHAR))
+                    END AS source_uwi,
+                    REGEXP_REPLACE(
+                        UPPER(
+                            CASE
+                                WHEN LOWER(TRIM(CAST(well_id AS VARCHAR))) IN ('', 'nan', 'none') THEN NULL
+                                ELSE TRIM(CAST(well_id AS VARCHAR))
+                            END
+                        ),
+                        '^(ABWI|SKWI)',
+                        ''
+                    ) AS compact_well_id,
+                    linked_facility_id,
+                    linked_facility_sub_type
+                FROM well_attributes
+            ),
+            well_attr_keyed AS (
+                SELECT
+                    COALESCE(
+                        source_uwi,
+                        CASE
+                            WHEN REGEXP_MATCHES(compact_well_id, '^[0-9]{12}W[1-6][0-9]{2}$') THEN
+                                SUBSTR(compact_well_id, 2, 2) || '/' ||
+                                SUBSTR(compact_well_id, 4, 2) || '-' ||
+                                SUBSTR(compact_well_id, 6, 2) || '-' ||
+                                SUBSTR(compact_well_id, 8, 3) || '-' ||
+                                SUBSTR(compact_well_id, 11, 2) ||
+                                SUBSTR(compact_well_id, 13, 2) || '/' ||
+                                CAST(CAST(SUBSTR(compact_well_id, 15, 2) AS INTEGER) AS VARCHAR)
+                            ELSE NULL
+                        END
+                    ) AS uwi,
+                    linked_facility_id,
+                    linked_facility_sub_type
+                FROM well_attr_source
+            ),
+            well_attr AS (
+                SELECT uwi, linked_facility_id, linked_facility_sub_type
+                FROM (
+                    SELECT
+                        wak.*,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY wak.uwi
+                            ORDER BY (wak.linked_facility_id IS NOT NULL) DESC
+                        ) AS rn
+                    FROM well_attr_keyed wak
+                    WHERE wak.uwi IS NOT NULL
+                )
+                WHERE rn = 1
             )
             SELECT fo.first_oil_month,
                    COUNT(*) AS first_oil_wells,
@@ -359,7 +468,7 @@ def run_report(conn: duckdb.DuckDBPyConnection, sql: str, sample_limit: int) -> 
                        WHERE wa.linked_facility_sub_type IN ('322','341','342','344','506')
                    ) AS multiwell_crude_facility_linked
             FROM first_oil fo
-            LEFT JOIN well_attributes wa USING (uwi)
+            LEFT JOIN well_attr wa USING (uwi)
             GROUP BY fo.first_oil_month
             ORDER BY fo.first_oil_month DESC
             LIMIT 12
