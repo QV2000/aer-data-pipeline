@@ -223,7 +223,9 @@ def fetch_digest_context(
     subject_day_format = "%#d" if os.name == "nt" else "%-d"
     subject = (
         f"TrendEnergy Radar — week of {week_start.strftime('%b ' + subject_day_format)}: "
-        f"{counts['new_operator']} new operators, {counts['near_facility']} near facilities"
+        f"{counts['new_operator']} new operators, "
+        f"{counts['near_facility']} near facilities, "
+        f"{counts['production_mover']} production movers"
     )
 
     xlsx_url = os.getenv("DIGEST_XLSX_URL")

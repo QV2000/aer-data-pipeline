@@ -30,6 +30,11 @@ Rows without an operator id or displayable operator name are filtered out before
 aggregation. They are not actionable in a rep email and should be handled as a
 data-quality follow-up, not as "Unresolved operator" cards.
 
+The HTML email renders only `new_operator`, `near_facility`, and
+`production_mover`. The `other` category remains queryable in
+`weekly_operator_digest` for diagnostics and later product decisions, but it is
+not included in the Monday rep email.
+
 The new-operator section intentionally remains weekly. The broader trailing
 12-month `new_operator_spotlight` workbook sheet is still available, but it is
 not repeated in every Monday digest unless one of those operators also has a
