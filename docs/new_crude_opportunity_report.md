@@ -209,6 +209,15 @@ window for lagged reporting:
 | `production_months` | 6 | first oil, because production is monthly and Petrinex lags current activity |
 | `oil_threshold_m3` | 1.0 | suppress tiny/null production noise |
 
+Event-driven signals must use a closed window:
+
+```sql
+event_date >= report_cutoff AND event_date <= as_of_date
+```
+
+This prevents scheduled future confidential release dates from appearing as
+current weekly leads before reps can act on them.
+
 ## Ranking
 
 Recommended priority:

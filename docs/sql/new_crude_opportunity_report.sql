@@ -322,8 +322,9 @@ latest_licence AS (
                 ORDER BY CAST(wl.issue_date AS DATE) DESC
             ) AS rn
         FROM well_licences wl
-        WHERE wl.uwi IS NOT NULL
-          AND wl.issue_date IS NOT NULL
+    WHERE wl.uwi IS NOT NULL
+      AND wl.issue_date IS NOT NULL
+      AND CAST(wl.issue_date AS DATE) <= CURRENT_DATE
     )
     WHERE rn = 1
 ),
@@ -336,6 +337,7 @@ licence_context AS (
     CROSS JOIN params p
     WHERE wl.uwi IS NOT NULL
       AND CAST(wl.issue_date AS DATE) >= p.lifecycle_cutoff
+      AND CAST(wl.issue_date AS DATE) <= p.as_of_date
     GROUP BY wl.uwi
 ),
 
@@ -347,6 +349,7 @@ spud_context AS (
     CROSS JOIN params p
     WHERE sa.uwi IS NOT NULL
       AND CAST(sa.spud_date AS DATE) >= p.lifecycle_cutoff
+      AND CAST(sa.spud_date AS DATE) <= p.as_of_date
     GROUP BY sa.uwi
 ),
 
@@ -358,6 +361,7 @@ status_context AS (
     CROSS JOIN params p
     WHERE sc.uwi IS NOT NULL
       AND CAST(sc.event_date AS DATE) >= p.lifecycle_cutoff
+      AND CAST(sc.event_date AS DATE) <= p.as_of_date
       AND (
           UPPER(sc.new_status) LIKE 'CR-OIL%'
           OR UPPER(sc.new_status) LIKE 'CR-BIT%'
@@ -384,6 +388,7 @@ release_context AS (
     FROM release_events re
     CROSS JOIN params p
     WHERE re.release_date >= p.lifecycle_cutoff
+      AND re.release_date <= p.as_of_date
     GROUP BY re.uwi
 ),
 
@@ -610,6 +615,7 @@ licence_signal AS (
     CROSS JOIN params p
     WHERE wl.uwi IS NOT NULL
       AND CAST(wl.issue_date AS DATE) >= p.report_cutoff
+      AND CAST(wl.issue_date AS DATE) <= p.as_of_date
       AND (
           CASE
               WHEN wa.linked_facility_sub_type IS NOT NULL THEN
@@ -654,6 +660,7 @@ spud_candidates AS (
     CROSS JOIN params p
     WHERE sa.uwi IS NOT NULL
       AND CAST(sa.spud_date AS DATE) >= p.report_cutoff
+      AND CAST(sa.spud_date AS DATE) <= p.as_of_date
 ),
 
 spud_signal AS (
@@ -702,6 +709,7 @@ status_signal AS (
     CROSS JOIN params p
     WHERE sc.uwi IS NOT NULL
       AND CAST(sc.event_date AS DATE) >= p.report_cutoff
+      AND CAST(sc.event_date AS DATE) <= p.as_of_date
       AND (
           UPPER(sc.new_status) LIKE 'CR-OIL%'
           OR UPPER(sc.new_status) LIKE 'CR-BIT%'
@@ -727,6 +735,7 @@ release_signal AS (
     LEFT JOIN well_attr wa ON wa.uwi = re.uwi
     CROSS JOIN params p
     WHERE re.release_date >= p.report_cutoff
+      AND re.release_date <= p.as_of_date
 ),
 
 new_battery_first_oil_signal AS (

@@ -191,6 +191,7 @@ WHERE primary_signal IN (
     'NEW_BATTERY_FIRST_OIL',
     'FIRST_CONFIRMED_OIL'
 )
+  AND latest_signal_date <= CURRENT_DATE
 ORDER BY
     sales_section,
     contact_priority_score DESC,
@@ -316,6 +317,7 @@ WHERE primary_signal IN (
     'PRODUCTION_RESTART',
     'PRODUCTION_STEP_CHANGE'
 )
+  AND latest_signal_date <= CURRENT_DATE
 ORDER BY
     production_report_month DESC,
     monthly_section,
