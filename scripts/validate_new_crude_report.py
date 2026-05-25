@@ -83,6 +83,15 @@ REQUIRED_TABLES: dict[str, set[str]] = {
         "centroid_lat",
         "centroid_lon",
     },
+    "operators_resolved": {
+        "identifier_kind",
+        "identifier_value",
+        "operator_id",
+        "canonical_name",
+        "short_name",
+        "confidence",
+        "source_table",
+    },
 }
 
 
@@ -495,7 +504,9 @@ def run_report(conn: duckdb.DuckDBPyConnection, sql: str, sample_limit: int) -> 
         conn.execute(
             """
             SELECT primary_signal, opportunity_type, well_count, well_name,
-                   display_operator, province, linked_facility_id,
+                   display_operator, operator_id, operator_short_name,
+                   source_display_operator, operator_resolution_kind,
+                   province, linked_facility_id,
                    linked_facility_name, linked_facility_sub_type_desc,
                    first_oil_month, latest_oil_m3, crude_hub_reach,
                    wells_in_pad

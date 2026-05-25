@@ -879,6 +879,79 @@ signal_rollup AS (
         MAX(CASE WHEN primary_rank = 1 THEN source_detail END) AS primary_source_detail
     FROM ranked_signals
     GROUP BY opportunity_id
+),
+
+operator_identifier_candidates AS (
+    SELECT opportunity_id, 10 AS priority, 'ab_ba_code_5' AS identifier_kind, raw_operator AS identifier_value
+    FROM opportunity_context
+    UNION ALL
+    SELECT opportunity_id, 20, 'ab_ba_code_4', raw_operator
+    FROM opportunity_context
+    UNION ALL
+    SELECT opportunity_id, 30, 'ab_ba_code_4', linked_facility_operator_baid
+    FROM opportunity_context
+    UNION ALL
+    SELECT opportunity_id, 40, 'ab_ba_code_5', linked_facility_operator_baid
+    FROM opportunity_context
+    UNION ALL
+    SELECT opportunity_id, 50, 'canonical_name', linked_facility_operator_legal_name
+    FROM opportunity_context
+    UNION ALL
+    SELECT opportunity_id, 55, 'facility_operator_name', linked_facility_operator_legal_name
+    FROM opportunity_context
+    UNION ALL
+    SELECT opportunity_id, 60, 'sk_legal_name', linked_facility_operator_legal_name
+    FROM opportunity_context
+    UNION ALL
+    SELECT opportunity_id, 70, 'canonical_name', display_operator
+    FROM opportunity_context
+    UNION ALL
+    SELECT opportunity_id, 80, 'well_licensee', display_operator
+    FROM opportunity_context
+    UNION ALL
+    SELECT opportunity_id, 90, 'sk_legal_name', display_operator
+    FROM opportunity_context
+    UNION ALL
+    SELECT opportunity_id, 100, 'facility_operator_name', display_operator
+    FROM opportunity_context
+    UNION ALL
+    SELECT opportunity_id, 110, 'operator_short_name', display_operator
+    FROM opportunity_context
+    UNION ALL
+    SELECT opportunity_id, 120, 'canonical_name', raw_operator
+    FROM opportunity_context
+    UNION ALL
+    SELECT opportunity_id, 130, 'well_licensee', raw_operator
+    FROM opportunity_context
+    UNION ALL
+    SELECT opportunity_id, 140, 'sk_legal_name', raw_operator
+    FROM opportunity_context
+),
+
+resolved_operator AS (
+    SELECT * EXCLUDE (rn)
+    FROM (
+        SELECT
+            c.opportunity_id,
+            r.operator_id,
+            r.canonical_name,
+            r.short_name,
+            r.identifier_kind AS operator_resolution_kind,
+            r.identifier_value AS operator_resolution_value,
+            r.confidence AS operator_resolution_confidence,
+            ROW_NUMBER() OVER (
+                PARTITION BY c.opportunity_id
+                ORDER BY c.priority, r.confidence DESC, r.operator_id
+            ) AS rn
+        FROM operator_identifier_candidates c
+        JOIN operators_resolved r
+          ON r.identifier_kind = c.identifier_kind
+         AND r.identifier_value = c.identifier_value
+        WHERE c.identifier_value IS NOT NULL
+          AND TRIM(c.identifier_value) != ''
+          AND LOWER(TRIM(c.identifier_value)) NOT IN ('nan', 'none')
+    )
+    WHERE rn = 1
 )
 
 SELECT
@@ -917,7 +990,13 @@ SELECT
     oc.wells_in_pad,
     oc.well_count,
     oc.well_name,
-    oc.display_operator,
+    COALESCE(ro.canonical_name, oc.display_operator) AS display_operator,
+    ro.operator_id,
+    ro.short_name AS operator_short_name,
+    oc.display_operator AS source_display_operator,
+    ro.operator_resolution_kind,
+    ro.operator_resolution_value,
+    ro.operator_resolution_confidence,
     oc.raw_operator,
     oc.well_licensee,
     oc.province,
@@ -967,6 +1046,7 @@ SELECT
 FROM signal_rollup sr
 CROSS JOIN params p
 JOIN opportunity_context oc ON oc.opportunity_id = sr.opportunity_id
+LEFT JOIN resolved_operator ro ON ro.opportunity_id = oc.opportunity_id
 ORDER BY
     sr.primary_priority DESC,
     sr.latest_signal_date DESC,

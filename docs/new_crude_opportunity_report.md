@@ -65,6 +65,10 @@ Core fields:
 | `linked_facility_name` | Battery/facility name reps recognize. |
 | `linked_facility_sub_type_desc` | Human-readable SWB/MWB/bitumen/oil-sands facility subtype. |
 | `crude_hub_reach` | Whether facility context suggests crude marketing access. |
+| `operator_id` | Canonical operator entity id from `operators_resolved`. |
+| `operator_short_name` | Short display label from the canonical operator table. |
+| `source_display_operator` | Pre-resolution operator string retained for QA. |
+| `operator_resolution_kind` | Identifier kind that produced the canonical match. |
 
 Derived fields used by the sales reports:
 
@@ -325,6 +329,41 @@ Surface:
 - `nearest_hub_id`
 - `hops_to_nearest_hub`
 - `crude_hub_reach`
+
+## Operator Resolution
+
+The report should resolve operator names through the warehouse
+`operators_resolved` view before export. Use a priority-ranked lookup, not a
+single broad `OR` join, so each opportunity gets one deterministic canonical
+operator.
+
+Resolution priority:
+
+1. AB 5-character BA code from the well/licensee source.
+2. AB 4-character BA code from the well/licensee or linked facility BA source.
+3. Linked facility operator legal name.
+4. Existing display/operator name from the well context.
+5. Raw licensee/operator fallback.
+
+Identifier kinds to use:
+
+- `ab_ba_code_5`
+- `ab_ba_code_4`
+- `canonical_name`
+- `facility_operator_name`
+- `well_licensee`
+- `sk_legal_name`
+- `operator_short_name`
+
+Export both the canonical value and the QA fields:
+
+- `display_operator` from `operators_resolved.canonical_name` when matched
+- `operator_id`
+- `operator_short_name`
+- `source_display_operator`
+- `operator_resolution_kind`
+- `operator_resolution_value`
+- `operator_resolution_confidence`
 
 ## Validation Queries
 

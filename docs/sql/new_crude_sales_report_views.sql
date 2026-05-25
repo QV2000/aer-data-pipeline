@@ -167,6 +167,11 @@ SELECT
     latest_signal_date,
     lifecycle_badges,
     display_operator,
+    operator_id,
+    operator_short_name,
+    source_display_operator,
+    operator_resolution_kind,
+    operator_resolution_confidence,
     opportunity_type,
     opportunity_id,
     uwi,
@@ -215,14 +220,16 @@ WITH ranked_queue AS (
     SELECT
         *,
         ROW_NUMBER() OVER (
-            PARTITION BY display_operator
+            PARTITION BY COALESCE(operator_id::VARCHAR, display_operator, 'UNRESOLVED')
             ORDER BY contact_priority_score DESC, latest_signal_date DESC, COALESCE(latest_oil_m3, 0) DESC
         ) AS operator_example_rank
     FROM new_crude_weekly_contact_queue
 ),
 operator_examples AS (
     SELECT
+        operator_id,
         display_operator,
+        MAX(operator_short_name) AS operator_short_name,
         STRING_AGG(
             primary_signal || ': ' || COALESCE(well_name, opportunity_id),
             '; '
@@ -230,11 +237,13 @@ operator_examples AS (
         ) AS top_examples
     FROM ranked_queue
     WHERE operator_example_rank <= 5
-    GROUP BY display_operator
+    GROUP BY operator_id, display_operator
 ),
 operator_rollup AS (
     SELECT
+        operator_id,
         display_operator,
+        MAX(operator_short_name) AS operator_short_name,
         COUNT(*) AS opportunity_count,
         SUM(well_count) AS represented_wells,
         COUNT(*) FILTER (WHERE sales_section = '1_CALL_NOW_PRE_VOLUME') AS call_now_pre_volume_count,
@@ -250,7 +259,7 @@ operator_rollup AS (
         STRING_AGG(DISTINCT field_name, ', ' ORDER BY field_name) FILTER (WHERE field_name IS NOT NULL) AS fields,
         STRING_AGG(DISTINCT primary_signal, ', ' ORDER BY primary_signal) AS signal_mix
     FROM new_crude_weekly_contact_queue
-    GROUP BY display_operator
+    GROUP BY operator_id, display_operator
 )
 SELECT
     ROW_NUMBER() OVER (
@@ -275,7 +284,9 @@ SELECT
         ELSE 'Review manually.'
     END AS recommended_operator_action
 FROM operator_rollup o
-LEFT JOIN operator_examples e USING (display_operator)
+LEFT JOIN operator_examples e
+  ON e.operator_id IS NOT DISTINCT FROM o.operator_id
+ AND e.display_operator IS NOT DISTINCT FROM o.display_operator
 ORDER BY operator_rank;
 
 CREATE OR REPLACE VIEW new_crude_monthly_confirmed_report AS
@@ -296,6 +307,11 @@ SELECT
     latest_signal_date,
     lifecycle_badges,
     display_operator,
+    operator_id,
+    operator_short_name,
+    source_display_operator,
+    operator_resolution_kind,
+    operator_resolution_confidence,
     opportunity_type,
     opportunity_id,
     uwi,
@@ -338,7 +354,9 @@ ORDER BY
 CREATE OR REPLACE VIEW new_crude_operator_monthly_summary AS
 WITH monthly_rollup AS (
     SELECT
+        operator_id,
         display_operator,
+        MAX(operator_short_name) AS operator_short_name,
         production_report_month,
         COUNT(*) AS opportunity_count,
         SUM(well_count) AS represented_wells,
@@ -353,7 +371,7 @@ WITH monthly_rollup AS (
         STRING_AGG(DISTINCT field_name, ', ' ORDER BY field_name) FILTER (WHERE field_name IS NOT NULL) AS fields,
         STRING_AGG(DISTINCT primary_signal, ', ' ORDER BY primary_signal) AS signal_mix
     FROM new_crude_monthly_confirmed_report
-    GROUP BY display_operator, production_report_month
+    GROUP BY operator_id, display_operator, production_report_month
 )
 SELECT
     ROW_NUMBER() OVER (
