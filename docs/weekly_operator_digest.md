@@ -11,15 +11,29 @@ Run `docs/sql/new_crude_opportunity_report.sql` first, then
 
 | View | Grain | Purpose |
 | --- | --- | --- |
-| `weekly_operator_digest` | One row per operator | Section assignment, counts, distance, volume, and MoM movement. |
-| `weekly_operator_timeline` | Up to 1-3 rows per operator | Lifecycle snippets rendered inside each email card. |
+| `weekly_operator_digest` | One row per operator/category | Section assignment, counts, distance, volume, and MoM movement. |
+| `weekly_operator_timeline` | Up to 1-3 rows per operator/category | Lifecycle snippets rendered inside each email card. |
 
-Digest categories are derived in this order:
+Digest categories are not mutually exclusive. If an operator has new activity
+near a TEMI facility and also has a production movement, the operator can appear
+in both sections. This keeps the production-mover section meaningful instead of
+hiding those operators behind facility proximity.
 
-1. `new_operator`: `is_new_operator = TRUE`.
+Category rules:
+
+1. `new_operator`: `is_new_operator = TRUE` and the operator has a weekly signal.
 2. `near_facility`: existing operator with activity inside 100 km of a TEMI facility.
-3. `production_mover`: production restart or step-change event.
-4. `other`: retained in the view, excluded from the email.
+3. `production_mover`: production restart or step-change in the latest production movement month.
+4. `other`: retained in the view for actionable non-section operators, excluded from the email.
+
+Rows without an operator id or displayable operator name are filtered out before
+aggregation. They are not actionable in a rep email and should be handled as a
+data-quality follow-up, not as "Unresolved operator" cards.
+
+The new-operator section intentionally remains weekly. The broader trailing
+12-month `new_operator_spotlight` workbook sheet is still available, but it is
+not repeated in every Monday digest unless one of those operators also has a
+fresh weekly signal.
 
 ## Dry Run
 

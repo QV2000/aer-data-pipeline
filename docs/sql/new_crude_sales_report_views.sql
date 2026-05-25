@@ -444,17 +444,58 @@ WITH digest_params AS (
         CURRENT_DATE::DATE AS as_of_date,
         (CURRENT_DATE - INTERVAL 7 DAY)::DATE AS week_cutoff
 ),
-digest_source AS (
+latest_production_mover_month AS (
+    SELECT MAX(latest_signal_date) AS latest_signal_date
+    FROM new_crude_lifecycle_timeline
+    WHERE primary_signal IN ('PRODUCTION_RESTART', 'PRODUCTION_STEP_CHANGE')
+      AND latest_signal_date <= CURRENT_DATE
+),
+actionable_events AS (
     SELECT
         COALESCE(
             operator_id::VARCHAR,
-            'NAME:' || COALESCE(NULLIF(TRIM(display_operator), ''), opportunity_id)
+            'NAME:' || NULLIF(TRIM(display_operator), '')
         ) AS operator_key,
-        *
+        'weekly' AS digest_scope,
+        new_crude_lifecycle_timeline.*
     FROM new_crude_lifecycle_timeline
     CROSS JOIN digest_params dp
-    WHERE latest_signal_date >= dp.week_cutoff
-      AND latest_signal_date <= dp.as_of_date
+    WHERE new_crude_lifecycle_timeline.latest_signal_date >= dp.week_cutoff
+      AND new_crude_lifecycle_timeline.latest_signal_date <= dp.as_of_date
+      AND (
+          operator_id IS NOT NULL
+          OR NULLIF(TRIM(display_operator), '') IS NOT NULL
+      )
+    UNION ALL
+    SELECT
+        COALESCE(
+            operator_id::VARCHAR,
+            'NAME:' || NULLIF(TRIM(display_operator), '')
+        ) AS operator_key,
+        'latest_production_mover' AS digest_scope,
+        new_crude_lifecycle_timeline.*
+    FROM new_crude_lifecycle_timeline
+    CROSS JOIN latest_production_mover_month lpm
+    WHERE new_crude_lifecycle_timeline.primary_signal IN ('PRODUCTION_RESTART', 'PRODUCTION_STEP_CHANGE')
+      AND new_crude_lifecycle_timeline.latest_signal_date = lpm.latest_signal_date
+      AND (
+          operator_id IS NOT NULL
+          OR NULLIF(TRIM(display_operator), '') IS NOT NULL
+      )
+),
+digest_source AS (
+    SELECT * EXCLUDE (rn)
+    FROM (
+        SELECT
+            ae.*,
+            ROW_NUMBER() OVER (
+                PARTITION BY operator_key, opportunity_id, primary_signal, latest_signal_date
+                ORDER BY CASE WHEN digest_scope = 'weekly' THEN 1 ELSE 2 END
+            ) AS rn
+        FROM actionable_events ae
+        WHERE operator_key IS NOT NULL
+    )
+    WHERE rn = 1
 ),
 operator_nearest AS (
     SELECT
@@ -479,20 +520,48 @@ operator_rollup AS (
         MAX(CASE WHEN is_new_operator THEN 1 ELSE 0 END) = 1 AS is_new_operator,
         MAX(operator_first_oil_month) AS operator_first_oil_month,
         MIN(distance_km) AS min_distance_km,
-        COUNT(*) AS signal_count_7d,
+        COUNT(*) FILTER (WHERE digest_scope = 'weekly') AS signal_count_7d,
         SUM(CASE WHEN COALESCE(latest_oil_m3, 0) > 0 THEN well_count ELSE 0 END) AS well_count_active,
         SUM(COALESCE(latest_oil_m3, 0)) AS last_month_oil_m3,
+        MAX(CASE WHEN digest_scope = 'weekly' THEN 1 ELSE 0 END) = 1 AS has_weekly_activity,
         MAX(CASE
             WHEN primary_signal IN ('PRODUCTION_RESTART', 'PRODUCTION_STEP_CHANGE') THEN 1
             ELSE 0
         END) = 1 AS has_production_mover,
+        MAX(CASE
+            WHEN primary_signal IN ('PRODUCTION_RESTART', 'PRODUCTION_STEP_CHANGE')
+            THEN latest_signal_date
+            ELSE NULL
+        END) AS production_mover_signal_date,
         SUM(CASE
             WHEN primary_signal IN ('PRODUCTION_RESTART', 'PRODUCTION_STEP_CHANGE')
-            THEN COALESCE(latest_mom_oil_delta_m3, latest_oil_m3, 0)
+            THEN COALESCE(NULLIF(latest_mom_oil_delta_m3, 0), latest_oil_m3, 0)
             ELSE 0
         END) AS mom_oil_delta_m3
     FROM digest_source
     GROUP BY operator_key
+),
+category_rows AS (
+    SELECT *, 'new_operator' AS category
+    FROM operator_rollup
+    WHERE is_new_operator
+      AND has_weekly_activity
+    UNION ALL
+    SELECT *, 'near_facility' AS category
+    FROM operator_rollup
+    WHERE min_distance_km < 100
+      AND has_weekly_activity
+    UNION ALL
+    SELECT *, 'production_mover' AS category
+    FROM operator_rollup
+    WHERE has_production_mover
+    UNION ALL
+    SELECT *, 'other' AS category
+    FROM operator_rollup
+    WHERE has_weekly_activity
+      AND NOT COALESCE(is_new_operator, FALSE)
+      AND NOT COALESCE(min_distance_km < 100, FALSE)
+      AND NOT COALESCE(has_production_mover, FALSE)
 )
 SELECT
     r.operator_key,
@@ -507,14 +576,11 @@ SELECT
     r.signal_count_7d,
     r.well_count_active,
     ROUND(r.last_month_oil_m3, 1) AS last_month_oil_m3,
-    CASE
-        WHEN r.is_new_operator THEN 'new_operator'
-        WHEN r.min_distance_km < 100 THEN 'near_facility'
-        WHEN r.has_production_mover THEN 'production_mover'
-        ELSE 'other'
-    END AS category,
+    r.category,
+    r.has_production_mover,
+    r.production_mover_signal_date,
     ROUND(r.mom_oil_delta_m3, 1) AS mom_oil_delta_m3
-FROM operator_rollup r
+FROM category_rows r
 LEFT JOIN operator_nearest n
   ON n.operator_key = r.operator_key
  AND n.rn = 1
@@ -547,7 +613,7 @@ candidate_events AS (
         COALESCE(t.primary_source_detail, t.sales_action, t.recommended_action, '') AS event_detail,
         COALESCE(t.linked_facility_name, t.well_name, t.opportunity_id) AS well_or_battery_label,
         ROW_NUMBER() OVER (
-            PARTITION BY d.operator_key
+            PARTITION BY d.operator_key, d.category
             ORDER BY
                 CASE
                     WHEN d.category = 'production_mover'
@@ -563,7 +629,7 @@ candidate_events AS (
     JOIN new_crude_lifecycle_timeline t
       ON COALESCE(
             t.operator_id::VARCHAR,
-            'NAME:' || COALESCE(NULLIF(TRIM(t.display_operator), ''), t.opportunity_id)
+            'NAME:' || NULLIF(TRIM(t.display_operator), '')
          ) = d.operator_key
     CROSS JOIN digest_params dp
     WHERE d.category IN ('new_operator', 'near_facility', 'production_mover')
@@ -577,8 +643,7 @@ candidate_events AS (
           OR (
               d.category = 'production_mover'
               AND t.primary_signal IN ('PRODUCTION_RESTART', 'PRODUCTION_STEP_CHANGE')
-              AND t.latest_signal_date >= dp.week_cutoff
-              AND t.latest_signal_date <= dp.as_of_date
+              AND t.latest_signal_date = d.production_mover_signal_date
           )
       )
 )

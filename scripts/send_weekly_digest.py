@@ -203,16 +203,19 @@ def fetch_digest_context(
         """
     ).df()
 
-    timeline_by_operator: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    timeline_by_operator: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
     for event in frame_records(timeline_df):
-        timeline_by_operator[str(event["operator_key"])].append(event)
+        timeline_by_operator[(str(event["operator_key"]), str(event["category"]))].append(event)
 
     sections: dict[str, list[dict[str, Any]]] = {category: [] for category in CATEGORY_ORDER}
     for operator in frame_records(digest_df):
         category = operator["category"]
         if category not in sections:
             continue
-        operator["timeline"] = timeline_by_operator.get(str(operator["operator_key"]), [])
+        operator["timeline"] = timeline_by_operator.get(
+            (str(operator["operator_key"]), str(category)),
+            [],
+        )
         sections[category].append(operator)
 
     week_start = as_of - timedelta(days=as_of.weekday())
