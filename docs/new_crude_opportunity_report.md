@@ -343,7 +343,9 @@ caps, while `operator_identifiers.canonical_name` stores mixed-case names.
 Do not put `UPPER(TRIM(...))` directly on both sides of a large join predicate;
 materialize normalized candidate and lookup values first, then join on those
 raw CTE columns. Otherwise DuckDB can fall back to a very slow join plan during
-the export.
+the export. The current SQL uses de-duplicated exact and normalized lookup maps
+plus fixed-priority `LEFT JOIN`s, which avoids building a large candidate-match
+intermediate.
 
 Resolution priority:
 

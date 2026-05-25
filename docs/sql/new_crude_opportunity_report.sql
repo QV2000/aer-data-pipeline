@@ -881,74 +881,43 @@ signal_rollup AS (
     GROUP BY opportunity_id
 ),
 
-operator_identifier_candidates_raw AS (
-    SELECT opportunity_id, 10 AS priority, 'ab_ba_code_5' AS identifier_kind, raw_operator AS identifier_value
-    FROM opportunity_context
-    UNION ALL
-    SELECT opportunity_id, 20, 'ab_ba_code_4', raw_operator
-    FROM opportunity_context
-    UNION ALL
-    SELECT opportunity_id, 30, 'ab_ba_code_4', linked_facility_operator_baid
-    FROM opportunity_context
-    UNION ALL
-    SELECT opportunity_id, 40, 'ab_ba_code_5', linked_facility_operator_baid
-    FROM opportunity_context
-    UNION ALL
-    SELECT opportunity_id, 50, 'canonical_name', linked_facility_operator_legal_name
-    FROM opportunity_context
-    UNION ALL
-    SELECT opportunity_id, 55, 'facility_operator_name', linked_facility_operator_legal_name
-    FROM opportunity_context
-    UNION ALL
-    SELECT opportunity_id, 60, 'sk_legal_name', linked_facility_operator_legal_name
-    FROM opportunity_context
-    UNION ALL
-    SELECT opportunity_id, 70, 'canonical_name', display_operator
-    FROM opportunity_context
-    UNION ALL
-    SELECT opportunity_id, 80, 'well_licensee', display_operator
-    FROM opportunity_context
-    UNION ALL
-    SELECT opportunity_id, 90, 'sk_legal_name', display_operator
-    FROM opportunity_context
-    UNION ALL
-    SELECT opportunity_id, 100, 'facility_operator_name', display_operator
-    FROM opportunity_context
-    UNION ALL
-    SELECT opportunity_id, 110, 'operator_short_name', display_operator
-    FROM opportunity_context
-    UNION ALL
-    SELECT opportunity_id, 120, 'canonical_name', raw_operator
-    FROM opportunity_context
-    UNION ALL
-    SELECT opportunity_id, 130, 'well_licensee', raw_operator
-    FROM opportunity_context
-    UNION ALL
-    SELECT opportunity_id, 140, 'sk_legal_name', raw_operator
-    FROM opportunity_context
-),
-
-operator_identifier_candidates AS MATERIALIZED (
+operator_resolution_keys AS MATERIALIZED (
     SELECT
         opportunity_id,
-        priority,
-        identifier_kind,
-        TRIM(identifier_value) AS identifier_value,
-        UPPER(TRIM(identifier_value)) AS identifier_value_norm,
-        identifier_kind IN (
-            'canonical_name',
-            'facility_operator_name',
-            'well_licensee',
-            'sk_legal_name',
-            'operator_short_name'
-        ) AS is_name_like_identifier
-    FROM operator_identifier_candidates_raw
-    WHERE identifier_value IS NOT NULL
-      AND TRIM(identifier_value) != ''
-      AND LOWER(TRIM(identifier_value)) NOT IN ('nan', 'none')
+        CASE
+            WHEN raw_operator IS NOT NULL
+             AND TRIM(raw_operator) != ''
+             AND LOWER(TRIM(raw_operator)) NOT IN ('nan', 'none')
+            THEN TRIM(raw_operator)
+        END AS raw_operator_key,
+        CASE
+            WHEN raw_operator IS NOT NULL
+             AND TRIM(raw_operator) != ''
+             AND LOWER(TRIM(raw_operator)) NOT IN ('nan', 'none')
+            THEN UPPER(TRIM(raw_operator))
+        END AS raw_operator_norm,
+        CASE
+            WHEN linked_facility_operator_baid IS NOT NULL
+             AND TRIM(linked_facility_operator_baid) != ''
+             AND LOWER(TRIM(linked_facility_operator_baid)) NOT IN ('nan', 'none')
+            THEN TRIM(linked_facility_operator_baid)
+        END AS linked_facility_operator_baid_key,
+        CASE
+            WHEN linked_facility_operator_legal_name IS NOT NULL
+             AND TRIM(linked_facility_operator_legal_name) != ''
+             AND LOWER(TRIM(linked_facility_operator_legal_name)) NOT IN ('nan', 'none')
+            THEN UPPER(TRIM(linked_facility_operator_legal_name))
+        END AS linked_facility_operator_legal_name_norm,
+        CASE
+            WHEN display_operator IS NOT NULL
+             AND TRIM(display_operator) != ''
+             AND LOWER(TRIM(display_operator)) NOT IN ('nan', 'none')
+            THEN UPPER(TRIM(display_operator))
+        END AS display_operator_norm
+    FROM opportunity_context
 ),
 
-operator_lookup AS MATERIALIZED (
+operator_lookup_source AS MATERIALIZED (
     SELECT
         identifier_kind,
         TRIM(identifier_value) AS identifier_value,
@@ -956,71 +925,218 @@ operator_lookup AS MATERIALIZED (
         operator_id,
         canonical_name,
         short_name,
-        confidence
+        confidence,
+        CASE confidence
+            WHEN 'manual' THEN 4
+            WHEN 'high' THEN 3
+            WHEN 'medium' THEN 2
+            WHEN 'low' THEN 1
+            ELSE 0
+        END AS confidence_rank
     FROM operators_resolved
     WHERE identifier_value IS NOT NULL
       AND TRIM(identifier_value) != ''
 ),
 
-operator_resolution_matches AS (
+operator_lookup_exact AS MATERIALIZED (
     SELECT
-        c.opportunity_id,
-        c.priority,
-        r.operator_id,
-        r.canonical_name,
-        r.short_name,
-        r.identifier_kind AS operator_resolution_kind,
-        r.identifier_value AS operator_resolution_value,
-        r.confidence AS operator_resolution_confidence
-    FROM operator_identifier_candidates c
-    JOIN operator_lookup r
-      ON r.identifier_kind = c.identifier_kind
-     AND r.identifier_value = c.identifier_value
-    WHERE NOT c.is_name_like_identifier
+        identifier_kind,
+        identifier_value,
+        operator_id,
+        canonical_name,
+        short_name,
+        confidence
+    FROM (
+        SELECT
+            l.*,
+            ROW_NUMBER() OVER (
+                PARTITION BY l.identifier_kind, l.identifier_value
+                ORDER BY l.confidence_rank DESC, l.operator_id
+            ) AS rn
+        FROM operator_lookup_source l
+    )
+    WHERE rn = 1
+),
 
-    UNION ALL
-
+operator_lookup_norm AS MATERIALIZED (
     SELECT
-        c.opportunity_id,
-        c.priority,
-        r.operator_id,
-        r.canonical_name,
-        r.short_name,
-        r.identifier_kind AS operator_resolution_kind,
-        r.identifier_value AS operator_resolution_value,
-        r.confidence AS operator_resolution_confidence
-    FROM operator_identifier_candidates c
-    JOIN operator_lookup r
-      ON r.identifier_kind = c.identifier_kind
-     AND r.identifier_value_norm = c.identifier_value_norm
-    WHERE c.is_name_like_identifier
+        identifier_kind,
+        identifier_value_norm,
+        identifier_value,
+        operator_id,
+        canonical_name,
+        short_name,
+        confidence
+    FROM (
+        SELECT
+            l.*,
+            ROW_NUMBER() OVER (
+                PARTITION BY l.identifier_kind, l.identifier_value_norm
+                ORDER BY l.confidence_rank DESC, l.operator_id
+            ) AS rn
+        FROM operator_lookup_source l
+        WHERE l.identifier_kind IN (
+            'canonical_name',
+            'facility_operator_name',
+            'well_licensee',
+            'sk_legal_name',
+            'operator_short_name'
+        )
+    )
+    WHERE rn = 1
 ),
 
 resolved_operator AS (
     SELECT
-        opportunity_id,
-        operator_id,
-        canonical_name,
-        short_name,
-        operator_resolution_kind,
-        operator_resolution_value,
-        operator_resolution_confidence
-    FROM (
-        SELECT
-            m.opportunity_id,
-            m.operator_id,
-            m.canonical_name,
-            m.short_name,
-            m.operator_resolution_kind,
-            m.operator_resolution_value,
-            m.operator_resolution_confidence,
-            ROW_NUMBER() OVER (
-                PARTITION BY m.opportunity_id
-                ORDER BY m.priority, m.operator_resolution_confidence DESC, m.operator_id
-            ) AS rn
-        FROM operator_resolution_matches m
-    )
-    WHERE rn = 1
+        k.opportunity_id,
+        COALESCE(
+            raw_ab5.operator_id,
+            raw_ab4.operator_id,
+            fac_baid_ab4.operator_id,
+            fac_baid_ab5.operator_id,
+            fac_legal_canon.operator_id,
+            fac_legal_fac.operator_id,
+            fac_legal_sk.operator_id,
+            display_canon.operator_id,
+            display_well.operator_id,
+            display_sk.operator_id,
+            display_fac.operator_id,
+            display_short.operator_id,
+            raw_canon.operator_id,
+            raw_well.operator_id,
+            raw_sk.operator_id
+        ) AS operator_id,
+        COALESCE(
+            raw_ab5.canonical_name,
+            raw_ab4.canonical_name,
+            fac_baid_ab4.canonical_name,
+            fac_baid_ab5.canonical_name,
+            fac_legal_canon.canonical_name,
+            fac_legal_fac.canonical_name,
+            fac_legal_sk.canonical_name,
+            display_canon.canonical_name,
+            display_well.canonical_name,
+            display_sk.canonical_name,
+            display_fac.canonical_name,
+            display_short.canonical_name,
+            raw_canon.canonical_name,
+            raw_well.canonical_name,
+            raw_sk.canonical_name
+        ) AS canonical_name,
+        COALESCE(
+            raw_ab5.short_name,
+            raw_ab4.short_name,
+            fac_baid_ab4.short_name,
+            fac_baid_ab5.short_name,
+            fac_legal_canon.short_name,
+            fac_legal_fac.short_name,
+            fac_legal_sk.short_name,
+            display_canon.short_name,
+            display_well.short_name,
+            display_sk.short_name,
+            display_fac.short_name,
+            display_short.short_name,
+            raw_canon.short_name,
+            raw_well.short_name,
+            raw_sk.short_name
+        ) AS short_name,
+        COALESCE(
+            raw_ab5.identifier_kind,
+            raw_ab4.identifier_kind,
+            fac_baid_ab4.identifier_kind,
+            fac_baid_ab5.identifier_kind,
+            fac_legal_canon.identifier_kind,
+            fac_legal_fac.identifier_kind,
+            fac_legal_sk.identifier_kind,
+            display_canon.identifier_kind,
+            display_well.identifier_kind,
+            display_sk.identifier_kind,
+            display_fac.identifier_kind,
+            display_short.identifier_kind,
+            raw_canon.identifier_kind,
+            raw_well.identifier_kind,
+            raw_sk.identifier_kind
+        ) AS operator_resolution_kind,
+        COALESCE(
+            raw_ab5.identifier_value,
+            raw_ab4.identifier_value,
+            fac_baid_ab4.identifier_value,
+            fac_baid_ab5.identifier_value,
+            fac_legal_canon.identifier_value,
+            fac_legal_fac.identifier_value,
+            fac_legal_sk.identifier_value,
+            display_canon.identifier_value,
+            display_well.identifier_value,
+            display_sk.identifier_value,
+            display_fac.identifier_value,
+            display_short.identifier_value,
+            raw_canon.identifier_value,
+            raw_well.identifier_value,
+            raw_sk.identifier_value
+        ) AS operator_resolution_value,
+        COALESCE(
+            raw_ab5.confidence,
+            raw_ab4.confidence,
+            fac_baid_ab4.confidence,
+            fac_baid_ab5.confidence,
+            fac_legal_canon.confidence,
+            fac_legal_fac.confidence,
+            fac_legal_sk.confidence,
+            display_canon.confidence,
+            display_well.confidence,
+            display_sk.confidence,
+            display_fac.confidence,
+            display_short.confidence,
+            raw_canon.confidence,
+            raw_well.confidence,
+            raw_sk.confidence
+        ) AS operator_resolution_confidence
+    FROM operator_resolution_keys k
+    LEFT JOIN operator_lookup_exact raw_ab5
+      ON raw_ab5.identifier_kind = 'ab_ba_code_5'
+     AND raw_ab5.identifier_value = k.raw_operator_key
+    LEFT JOIN operator_lookup_exact raw_ab4
+      ON raw_ab4.identifier_kind = 'ab_ba_code_4'
+     AND raw_ab4.identifier_value = k.raw_operator_key
+    LEFT JOIN operator_lookup_exact fac_baid_ab4
+      ON fac_baid_ab4.identifier_kind = 'ab_ba_code_4'
+     AND fac_baid_ab4.identifier_value = k.linked_facility_operator_baid_key
+    LEFT JOIN operator_lookup_exact fac_baid_ab5
+      ON fac_baid_ab5.identifier_kind = 'ab_ba_code_5'
+     AND fac_baid_ab5.identifier_value = k.linked_facility_operator_baid_key
+    LEFT JOIN operator_lookup_norm fac_legal_canon
+      ON fac_legal_canon.identifier_kind = 'canonical_name'
+     AND fac_legal_canon.identifier_value_norm = k.linked_facility_operator_legal_name_norm
+    LEFT JOIN operator_lookup_norm fac_legal_fac
+      ON fac_legal_fac.identifier_kind = 'facility_operator_name'
+     AND fac_legal_fac.identifier_value_norm = k.linked_facility_operator_legal_name_norm
+    LEFT JOIN operator_lookup_norm fac_legal_sk
+      ON fac_legal_sk.identifier_kind = 'sk_legal_name'
+     AND fac_legal_sk.identifier_value_norm = k.linked_facility_operator_legal_name_norm
+    LEFT JOIN operator_lookup_norm display_canon
+      ON display_canon.identifier_kind = 'canonical_name'
+     AND display_canon.identifier_value_norm = k.display_operator_norm
+    LEFT JOIN operator_lookup_norm display_well
+      ON display_well.identifier_kind = 'well_licensee'
+     AND display_well.identifier_value_norm = k.display_operator_norm
+    LEFT JOIN operator_lookup_norm display_sk
+      ON display_sk.identifier_kind = 'sk_legal_name'
+     AND display_sk.identifier_value_norm = k.display_operator_norm
+    LEFT JOIN operator_lookup_norm display_fac
+      ON display_fac.identifier_kind = 'facility_operator_name'
+     AND display_fac.identifier_value_norm = k.display_operator_norm
+    LEFT JOIN operator_lookup_norm display_short
+      ON display_short.identifier_kind = 'operator_short_name'
+     AND display_short.identifier_value_norm = k.display_operator_norm
+    LEFT JOIN operator_lookup_norm raw_canon
+      ON raw_canon.identifier_kind = 'canonical_name'
+     AND raw_canon.identifier_value_norm = k.raw_operator_norm
+    LEFT JOIN operator_lookup_norm raw_well
+      ON raw_well.identifier_kind = 'well_licensee'
+     AND raw_well.identifier_value_norm = k.raw_operator_norm
+    LEFT JOIN operator_lookup_norm raw_sk
+      ON raw_sk.identifier_kind = 'sk_legal_name'
+     AND raw_sk.identifier_value_norm = k.raw_operator_norm
 )
 
 SELECT
