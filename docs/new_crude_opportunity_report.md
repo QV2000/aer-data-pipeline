@@ -28,6 +28,8 @@ products should be built from it:
 | --- | --- | --- | --- |
 | Weekly Contact Queue | Weekly | Early outreach before volume confirms, with confirmed first-oil addendum. | `new_crude_weekly_contact_queue` |
 | Weekly Operator Summary | Weekly | Rank operators by current contact urgency and represented wells. | `new_crude_operator_weekly_summary` |
+| Weekly Operator Digest | Weekly | Operator-grain HTML digest grouped by new operators, TEMI facility proximity, and production movers. | `weekly_operator_digest` |
+| Weekly Operator Timeline | Weekly | Up to 1-3 lifecycle events per digest operator card. | `weekly_operator_timeline` |
 | Monthly Confirmed Report | Monthly | Definitive production-backed wells/pads and production momentum. | `new_crude_monthly_confirmed_report` |
 | Monthly Operator Summary | Monthly | Rank operators by first oil, battery events, restarts, step changes, and oil size. | `new_crude_operator_monthly_summary` |
 | Lifecycle Timeline | Internal / API | Normalized stages, contact scores, and next expected signal. | `new_crude_lifecycle_timeline` |
@@ -74,7 +76,7 @@ Derived fields used by the sales reports:
 
 | Column | Purpose |
 | --- | --- |
-| `sales_section` | Report section: call now, confirmed new crude, research queue, watchlist, momentum. |
+| `sales_section` | Report section: early signals, confirmed new oil, research, watchlist, production changes. |
 | `contact_priority` | Rep-facing action bucket. |
 | `contact_priority_score` | Numeric sort order inside the queue. |
 | `sales_action` | Plain-language recommended action. |
@@ -240,11 +242,11 @@ Sort by priority, then latest signal date, then latest oil volume.
 
 For the weekly contact queue, use sales sections rather than raw signal ranking:
 
-1. `1_CALL_NOW_PRE_VOLUME`: `CONFIDENTIAL_RELEASE`, `ACTIVE_CRUDE_STATUS`, `SPUD_CRUDE_LIKELY` before first oil.
-2. `2_CONFIRMED_NEW_CRUDE`: `NEW_BATTERY_FIRST_OIL`, `FIRST_CONFIRMED_OIL`, plus recent high-value status/release/spud signals that already have first oil.
-3. `3_RESEARCH_QUEUE`: `LICENCE_OIL`.
+1. `1_EARLY_SIGNALS`: `CONFIDENTIAL_RELEASE`, `ACTIVE_CRUDE_STATUS`, `SPUD_CRUDE_LIKELY` before first oil.
+2. `2_CONFIRMED_NEW_OIL`: `NEW_BATTERY_FIRST_OIL`, `FIRST_CONFIRMED_OIL`, plus recent high-value status/release/spud signals that already have first oil.
+3. `3_RESEARCH`: `LICENCE_OIL`.
 4. `4_WATCHLIST`: `SPUD_UNKNOWN_FLUID`.
-5. `5_PRODUCTION_MOMENTUM`: restart and step-change rows, kept out of the default new-well queue.
+5. `5_PRODUCTION_CHANGES`: restart and step-change rows, kept out of the default new-well queue.
 
 For the monthly confirmed report, include only production-backed signals:
 

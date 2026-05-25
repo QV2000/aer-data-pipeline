@@ -4,7 +4,7 @@
 -- new_crude_opportunity_report view exists in the current DuckDB session.
 --
 -- These views split the lifecycle radar into practical sales products:
---   * weekly contact queue: early/pre-volume leads plus confirmed new crude
+--   * weekly contact queue: early/pre-volume leads plus confirmed new oil
 --   * weekly operator summary: who reps should prioritize this week
 --   * monthly confirmed report: production-backed wells/pads and momentum
 --   * monthly operator summary: definitive production-backed rollup
@@ -14,18 +14,18 @@ SELECT
     CASE
         WHEN primary_signal IN ('ACTIVE_CRUDE_STATUS', 'CONFIDENTIAL_RELEASE', 'SPUD_CRUDE_LIKELY')
              AND first_oil_month IS NULL
-        THEN '1_CALL_NOW_PRE_VOLUME'
+        THEN '1_EARLY_SIGNALS'
         WHEN primary_signal IN ('NEW_BATTERY_FIRST_OIL', 'FIRST_CONFIRMED_OIL')
-        THEN '2_CONFIRMED_NEW_CRUDE'
+        THEN '2_CONFIRMED_NEW_OIL'
         WHEN primary_signal IN ('ACTIVE_CRUDE_STATUS', 'CONFIDENTIAL_RELEASE', 'SPUD_CRUDE_LIKELY')
              AND first_oil_month IS NOT NULL
-        THEN '2_CONFIRMED_NEW_CRUDE'
+        THEN '2_CONFIRMED_NEW_OIL'
         WHEN primary_signal = 'LICENCE_OIL'
-        THEN '3_RESEARCH_QUEUE'
+        THEN '3_RESEARCH'
         WHEN primary_signal = 'SPUD_UNKNOWN_FLUID'
         THEN '4_WATCHLIST'
         WHEN primary_signal IN ('PRODUCTION_RESTART', 'PRODUCTION_STEP_CHANGE')
-        THEN '5_PRODUCTION_MOMENTUM'
+        THEN '5_PRODUCTION_CHANGES'
         ELSE '9_OTHER'
     END AS sales_section,
     CASE
@@ -43,36 +43,36 @@ SELECT
     CASE
         WHEN primary_signal IN ('CONFIDENTIAL_RELEASE', 'ACTIVE_CRUDE_STATUS', 'SPUD_CRUDE_LIKELY')
              AND first_oil_month IS NULL
-        THEN 'CALL_NOW'
+        THEN 'EARLY_REVIEW'
         WHEN primary_signal IN ('NEW_BATTERY_FIRST_OIL', 'FIRST_CONFIRMED_OIL')
-        THEN 'CONFIRMED_FOLLOW_UP'
+        THEN 'CONFIRMED_REVIEW'
         WHEN primary_signal IN ('CONFIDENTIAL_RELEASE', 'ACTIVE_CRUDE_STATUS', 'SPUD_CRUDE_LIKELY')
              AND first_oil_month IS NOT NULL
-        THEN 'CONFIRMED_FOLLOW_UP'
+        THEN 'CONFIRMED_REVIEW'
         WHEN primary_signal = 'LICENCE_OIL'
-        THEN 'RESEARCH_QUEUE'
+        THEN 'RESEARCH'
         WHEN primary_signal = 'SPUD_UNKNOWN_FLUID'
         THEN 'WATCHLIST'
         WHEN primary_signal IN ('PRODUCTION_RESTART', 'PRODUCTION_STEP_CHANGE')
-        THEN 'MONITOR_MOMENTUM'
+        THEN 'MONITOR'
         ELSE 'REVIEW'
     END AS contact_priority,
     CASE
         WHEN primary_signal = 'NEW_BATTERY_FIRST_OIL'
-        THEN 'Pad/battery first oil confirmed; contact operator with pad-level crude marketing offer.'
+        THEN 'Pad/battery first oil confirmed; review operator, volume, and facility context.'
         WHEN primary_signal = 'FIRST_CONFIRMED_OIL'
-        THEN 'First oil confirmed; contact operator with production-backed crude marketing offer.'
+        THEN 'First oil confirmed; review production-backed crude opportunity.'
         WHEN primary_signal = 'CONFIDENTIAL_RELEASE'
-        THEN 'Previously confidential well is newly visible; research and contact before monthly production confirms.'
+        THEN 'Previously confidential well is newly visible; prioritize operator research before monthly production confirms.'
         WHEN primary_signal = 'ACTIVE_CRUDE_STATUS'
              AND first_oil_month IS NOT NULL
-        THEN 'Active crude status is already production-backed; contact with latest volume and facility context.'
+        THEN 'Active crude status is already production-backed; review latest volume and facility context.'
         WHEN primary_signal = 'ACTIVE_CRUDE_STATUS'
-        THEN 'Well reached active crude status; contact before Petrinex monthly volume appears.'
+        THEN 'Well reached active crude status; review before Petrinex monthly volume appears.'
         WHEN primary_signal = 'SPUD_CRUDE_LIKELY'
-        THEN 'Drilling started with crude evidence; contact early or assign to rep watchlist.'
+        THEN 'Drilling started with crude evidence; add to early operator review.'
         WHEN primary_signal = 'LICENCE_OIL'
-        THEN 'Oil licence issued; research operator and area, then queue for spud/status follow-up.'
+        THEN 'Oil licence issued; research operator and area, then watch for spud/status follow-up.'
         WHEN primary_signal = 'SPUD_UNKNOWN_FLUID'
         THEN 'Drilling started but crude is not proven; watch for status, facility, or production confirmation.'
         WHEN primary_signal = 'PRODUCTION_RESTART'
@@ -193,6 +193,7 @@ SELECT
     first_oil_month,
     latest_prod_month,
     latest_oil_m3,
+    latest_mom_oil_delta_m3,
     latest_water_m3,
     centroid_lat,
     centroid_lon,
@@ -252,9 +253,9 @@ operator_rollup AS (
         MAX(operator_short_name) AS operator_short_name,
         COUNT(*) AS opportunity_count,
         SUM(well_count) AS represented_wells,
-        COUNT(*) FILTER (WHERE sales_section = '1_CALL_NOW_PRE_VOLUME') AS call_now_pre_volume_count,
-        COUNT(*) FILTER (WHERE sales_section = '2_CONFIRMED_NEW_CRUDE') AS confirmed_new_crude_count,
-        COUNT(*) FILTER (WHERE sales_section = '3_RESEARCH_QUEUE') AS research_queue_count,
+        COUNT(*) FILTER (WHERE sales_section = '1_EARLY_SIGNALS') AS early_signal_count,
+        COUNT(*) FILTER (WHERE sales_section = '2_CONFIRMED_NEW_OIL') AS confirmed_new_oil_count,
+        COUNT(*) FILTER (WHERE sales_section = '3_RESEARCH') AS research_count,
         COUNT(*) FILTER (WHERE sales_section = '4_WATCHLIST') AS watchlist_count,
         COUNT(*) FILTER (WHERE opportunity_type = 'BATTERY') AS battery_opportunity_count,
         COUNT(DISTINCT linked_facility_id) FILTER (WHERE linked_facility_id IS NOT NULL) AS linked_facility_count,
@@ -270,8 +271,8 @@ operator_rollup AS (
 SELECT
     ROW_NUMBER() OVER (
         ORDER BY
-            call_now_pre_volume_count DESC,
-            confirmed_new_crude_count DESC,
+            early_signal_count DESC,
+            confirmed_new_oil_count DESC,
             top_contact_priority_score DESC,
             represented_wells DESC,
             latest_signal_date DESC
@@ -279,12 +280,12 @@ SELECT
     o.*,
     e.top_examples,
     CASE
-        WHEN call_now_pre_volume_count > 0
-        THEN 'Contact this week before production volume confirms.'
-        WHEN confirmed_new_crude_count > 0
-        THEN 'Follow up with production-backed crude opportunity.'
-        WHEN research_queue_count > 0
-        THEN 'Research licence/spud context and assign to rep queue.'
+        WHEN early_signal_count > 0
+        THEN 'Review this week before production volume confirms.'
+        WHEN confirmed_new_oil_count > 0
+        THEN 'Review production-backed crude opportunity.'
+        WHEN research_count > 0
+        THEN 'Research licence/spud context and assign for follow-up.'
         WHEN watchlist_count > 0
         THEN 'Monitor until crude evidence improves.'
         ELSE 'Review manually.'
@@ -335,6 +336,7 @@ SELECT
     first_oil_month,
     latest_prod_month,
     latest_oil_m3,
+    latest_mom_oil_delta_m3,
     latest_water_m3,
     latest_cond_m3,
     is_crude_connected,
@@ -399,7 +401,7 @@ SELECT
         WHEN new_battery_first_oil_count > 0
         THEN 'Pad-level first oil confirmed; review battery and facility path.'
         WHEN first_confirmed_oil_count > 0
-        THEN 'New well-level first oil confirmed; contact with production-backed offer.'
+        THEN 'New well-level first oil confirmed; review production-backed opportunity.'
         WHEN restart_count > 0
         THEN 'Restarted crude production; review changed takeaway needs.'
         WHEN step_change_count > 0
@@ -419,8 +421,8 @@ SELECT
     operator_first_oil_month,
     COUNT(*) AS opportunity_count,
     SUM(well_count) AS represented_wells,
-    COUNT(*) FILTER (WHERE sales_section = '1_CALL_NOW_PRE_VOLUME') AS call_now_pre_volume_count,
-    COUNT(*) FILTER (WHERE sales_section = '2_CONFIRMED_NEW_CRUDE') AS confirmed_new_crude_count,
+    COUNT(*) FILTER (WHERE sales_section = '1_EARLY_SIGNALS') AS early_signal_count,
+    COUNT(*) FILTER (WHERE sales_section = '2_CONFIRMED_NEW_OIL') AS confirmed_new_oil_count,
     COUNT(*) FILTER (WHERE sales_section = '4_WATCHLIST') AS watchlist_count,
     COUNT(*) FILTER (WHERE opportunity_type = 'BATTERY') AS battery_opportunity_count,
     STRING_AGG(DISTINCT province, ', ' ORDER BY province) AS provinces,
@@ -432,9 +434,175 @@ WHERE is_new_operator = TRUE
 GROUP BY operator_id, display_operator, operator_short_name,
          operator_size_tier, avg_monthly_oil_m3, operator_first_oil_month
 ORDER BY operator_first_oil_month DESC NULLS LAST,
-         confirmed_new_crude_count DESC,
-         call_now_pre_volume_count DESC,
+         confirmed_new_oil_count DESC,
+         early_signal_count DESC,
          opportunity_count DESC;
+
+CREATE OR REPLACE VIEW weekly_operator_digest AS
+WITH digest_params AS (
+    SELECT
+        CURRENT_DATE::DATE AS as_of_date,
+        (CURRENT_DATE - INTERVAL 7 DAY)::DATE AS week_cutoff
+),
+digest_source AS (
+    SELECT
+        COALESCE(
+            operator_id::VARCHAR,
+            'NAME:' || COALESCE(NULLIF(TRIM(display_operator), ''), opportunity_id)
+        ) AS operator_key,
+        *
+    FROM new_crude_lifecycle_timeline
+    CROSS JOIN digest_params dp
+    WHERE latest_signal_date >= dp.week_cutoff
+      AND latest_signal_date <= dp.as_of_date
+),
+operator_nearest AS (
+    SELECT
+        operator_key,
+        nearest_facility_id,
+        distance_km,
+        ROW_NUMBER() OVER (
+            PARTITION BY operator_key
+            ORDER BY distance_km ASC NULLS LAST, nearest_facility_id
+        ) AS rn
+    FROM digest_source
+    WHERE distance_km IS NOT NULL
+),
+operator_rollup AS (
+    SELECT
+        operator_key,
+        MAX(operator_id) AS operator_id,
+        COALESCE(MAX(display_operator), 'Unresolved operator') AS display_operator,
+        MAX(operator_short_name) AS operator_short_name,
+        STRING_AGG(DISTINCT province, ', ' ORDER BY province)
+            FILTER (WHERE province IS NOT NULL) AS province,
+        MAX(CASE WHEN is_new_operator THEN 1 ELSE 0 END) = 1 AS is_new_operator,
+        MAX(operator_first_oil_month) AS operator_first_oil_month,
+        MIN(distance_km) AS min_distance_km,
+        COUNT(*) AS signal_count_7d,
+        SUM(CASE WHEN COALESCE(latest_oil_m3, 0) > 0 THEN well_count ELSE 0 END) AS well_count_active,
+        SUM(COALESCE(latest_oil_m3, 0)) AS last_month_oil_m3,
+        MAX(CASE
+            WHEN primary_signal IN ('PRODUCTION_RESTART', 'PRODUCTION_STEP_CHANGE') THEN 1
+            ELSE 0
+        END) = 1 AS has_production_mover,
+        SUM(CASE
+            WHEN primary_signal IN ('PRODUCTION_RESTART', 'PRODUCTION_STEP_CHANGE')
+            THEN COALESCE(latest_mom_oil_delta_m3, latest_oil_m3, 0)
+            ELSE 0
+        END) AS mom_oil_delta_m3
+    FROM digest_source
+    GROUP BY operator_key
+)
+SELECT
+    r.operator_key,
+    r.operator_id,
+    r.display_operator,
+    r.operator_short_name,
+    r.province,
+    r.is_new_operator,
+    r.operator_first_oil_month,
+    n.nearest_facility_id,
+    r.min_distance_km,
+    r.signal_count_7d,
+    r.well_count_active,
+    ROUND(r.last_month_oil_m3, 1) AS last_month_oil_m3,
+    CASE
+        WHEN r.is_new_operator THEN 'new_operator'
+        WHEN r.min_distance_km < 100 THEN 'near_facility'
+        WHEN r.has_production_mover THEN 'production_mover'
+        ELSE 'other'
+    END AS category,
+    ROUND(r.mom_oil_delta_m3, 1) AS mom_oil_delta_m3
+FROM operator_rollup r
+LEFT JOIN operator_nearest n
+  ON n.operator_key = r.operator_key
+ AND n.rn = 1
+ORDER BY
+    CASE
+        WHEN category = 'new_operator' THEN 1
+        WHEN category = 'near_facility' THEN 2
+        WHEN category = 'production_mover' THEN 3
+        ELSE 9
+    END,
+    CASE WHEN category = 'new_operator' THEN operator_first_oil_month END DESC NULLS LAST,
+    CASE WHEN category = 'near_facility' THEN min_distance_km END ASC NULLS LAST,
+    CASE WHEN category = 'production_mover' THEN mom_oil_delta_m3 END DESC NULLS LAST,
+    display_operator;
+
+CREATE OR REPLACE VIEW weekly_operator_timeline AS
+WITH digest_params AS (
+    SELECT
+        CURRENT_DATE::DATE AS as_of_date,
+        (CURRENT_DATE - INTERVAL 7 DAY)::DATE AS week_cutoff
+),
+candidate_events AS (
+    SELECT
+        d.operator_key,
+        d.operator_id,
+        d.display_operator,
+        d.category,
+        t.latest_signal_date AS event_date,
+        t.primary_signal AS event_type,
+        COALESCE(t.primary_source_detail, t.sales_action, t.recommended_action, '') AS event_detail,
+        COALESCE(t.linked_facility_name, t.well_name, t.opportunity_id) AS well_or_battery_label,
+        ROW_NUMBER() OVER (
+            PARTITION BY d.operator_key
+            ORDER BY
+                CASE
+                    WHEN d.category = 'production_mover'
+                     AND t.primary_signal IN ('PRODUCTION_RESTART', 'PRODUCTION_STEP_CHANGE')
+                    THEN 0
+                    ELSE 1
+                END,
+                t.latest_signal_date DESC,
+                t.contact_priority_score DESC,
+                t.opportunity_id
+        ) AS event_rank
+    FROM weekly_operator_digest d
+    JOIN new_crude_lifecycle_timeline t
+      ON COALESCE(
+            t.operator_id::VARCHAR,
+            'NAME:' || COALESCE(NULLIF(TRIM(t.display_operator), ''), t.opportunity_id)
+         ) = d.operator_key
+    CROSS JOIN digest_params dp
+    WHERE d.category IN ('new_operator', 'near_facility', 'production_mover')
+      AND (
+          d.category = 'new_operator'
+          OR (
+              d.category = 'near_facility'
+              AND t.latest_signal_date >= dp.week_cutoff
+              AND t.latest_signal_date <= dp.as_of_date
+          )
+          OR (
+              d.category = 'production_mover'
+              AND t.primary_signal IN ('PRODUCTION_RESTART', 'PRODUCTION_STEP_CHANGE')
+              AND t.latest_signal_date >= dp.week_cutoff
+              AND t.latest_signal_date <= dp.as_of_date
+          )
+      )
+)
+SELECT
+    operator_key,
+    operator_id,
+    display_operator,
+    category,
+    event_date,
+    event_type,
+    event_detail,
+    well_or_battery_label
+FROM candidate_events
+WHERE (
+        category = 'production_mover'
+        AND event_rank <= 1
+      )
+   OR (
+        category IN ('new_operator', 'near_facility')
+        AND event_rank <= 3
+      )
+ORDER BY
+    operator_key,
+    event_date DESC;
 
 CREATE OR REPLACE VIEW new_crude_report_sheet_manifest AS
 SELECT *
@@ -445,5 +613,7 @@ FROM (
         ('monthly_confirmed_report', 'new_crude_monthly_confirmed_report', 'Production-backed monthly report.'),
         ('monthly_operator_summary', 'new_crude_operator_monthly_summary', 'Operator rollup for monthly confirmed production.'),
         ('lifecycle_timeline', 'new_crude_lifecycle_timeline', 'Full derived lifecycle fields for debugging and product integration.'),
-        ('new_operator_spotlight', 'new_crude_new_operator_spotlight', 'Operators whose first oil is within the trailing 12 months. New entrants worth proactive outreach.')
+        ('new_operator_spotlight', 'new_crude_new_operator_spotlight', 'Operators whose first oil is within the trailing 12 months. New entrants worth proactive outreach.'),
+        ('weekly_operator_digest', 'weekly_operator_digest', 'Operator-grain weekly digest for the rep email.'),
+        ('weekly_operator_timeline', 'weekly_operator_timeline', 'Lifecycle event snippets for weekly operator digest cards.')
 ) AS t(sheet_name, view_name, description);

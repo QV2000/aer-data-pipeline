@@ -269,24 +269,6 @@ first_oil_rows AS (
      AND pc.prod_month = fo.first_oil_month
 ),
 
-latest_prod AS (
-    SELECT
-        uwi,
-        prod_month AS latest_prod_month,
-        oil_prod_vol AS latest_oil_m3,
-        gas_prod_vol AS latest_gas_e3m3,
-        water_prod_vol AS latest_water_m3,
-        cond_prod_vol AS latest_cond_m3,
-        hours_on AS latest_hours_on
-    FROM (
-        SELECT
-            pc.*,
-            ROW_NUMBER() OVER (PARTITION BY pc.uwi ORDER BY pc.prod_month DESC) AS rn
-        FROM production_clean pc
-    )
-    WHERE rn = 1
-),
-
 production_lag AS (
     SELECT
         pc.*,
@@ -305,6 +287,25 @@ production_lag AS (
             ROWS BETWEEN 3 PRECEDING AND 1 PRECEDING
         ) AS oil_prior_3mo_avg
     FROM production_clean pc
+),
+
+latest_prod AS (
+    SELECT
+        uwi,
+        prod_month AS latest_prod_month,
+        oil_prod_vol AS latest_oil_m3,
+        oil_prod_vol - COALESCE(oil_prev_1, 0) AS latest_mom_oil_delta_m3,
+        gas_prod_vol AS latest_gas_e3m3,
+        water_prod_vol AS latest_water_m3,
+        cond_prod_vol AS latest_cond_m3,
+        hours_on AS latest_hours_on
+    FROM (
+        SELECT
+            pl.*,
+            ROW_NUMBER() OVER (PARTITION BY pl.uwi ORDER BY pl.prod_month DESC) AS rn
+        FROM production_lag pl
+    )
+    WHERE rn = 1
 ),
 
 latest_licence AS (
@@ -471,6 +472,7 @@ well_context AS (
         fo.first_oil_month,
         lp.latest_prod_month,
         lp.latest_oil_m3,
+        lp.latest_mom_oil_delta_m3,
         lp.latest_gas_e3m3,
         lp.latest_water_m3,
         lp.latest_cond_m3,
@@ -574,6 +576,7 @@ battery_context AS (
         g.first_oil_month,
         MAX(lp.latest_prod_month) AS latest_prod_month,
         SUM(COALESCE(lp.latest_oil_m3, 0)) AS latest_oil_m3,
+        SUM(COALESCE(lp.latest_mom_oil_delta_m3, 0)) AS latest_mom_oil_delta_m3,
         SUM(COALESCE(lp.latest_gas_e3m3, 0)) AS latest_gas_e3m3,
         SUM(COALESCE(lp.latest_water_m3, 0)) AS latest_water_m3,
         SUM(COALESCE(lp.latest_cond_m3, 0)) AS latest_cond_m3,
@@ -635,7 +638,7 @@ licence_signal AS (
         CAST(wl.issue_date AS DATE) AS signal_date,
         50 AS signal_priority,
         'LIKELY' AS confidence,
-        'Add to prospecting list; verify spud and operator contact.' AS recommended_action,
+        'Add to prospecting list; verify spud and operator context.' AS recommended_action,
         COALESCE(wl.well_completion_type, wa.linked_facility_sub_type_desc) AS source_detail
     FROM well_licences wl
     LEFT JOIN well_attr wa ON wa.uwi = wl.uwi
@@ -769,7 +772,7 @@ first_oil_signal AS (
         fo.first_oil_month AS signal_date,
         100 AS signal_priority,
         'CONFIRMED' AS confidence,
-        'Call with production-backed crude marketing offer.' AS recommended_action,
+        'Review production-backed crude opportunity.' AS recommended_action,
         'first oil production month' AS source_detail
     FROM first_oil fo
     LEFT JOIN well_attr wa ON wa.uwi = fo.uwi
@@ -1363,6 +1366,7 @@ SELECT
     oc.first_oil_month,
     oc.latest_prod_month,
     oc.latest_oil_m3,
+    oc.latest_mom_oil_delta_m3,
     oc.latest_gas_e3m3,
     oc.latest_water_m3,
     oc.latest_cond_m3,
