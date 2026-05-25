@@ -881,7 +881,7 @@ signal_rollup AS (
     GROUP BY opportunity_id
 ),
 
-operator_identifier_candidates AS (
+operator_identifier_candidates_raw AS (
     SELECT opportunity_id, 10 AS priority, 'ab_ba_code_5' AS identifier_kind, raw_operator AS identifier_value
     FROM opportunity_context
     UNION ALL
@@ -928,40 +928,97 @@ operator_identifier_candidates AS (
     FROM opportunity_context
 ),
 
+operator_identifier_candidates AS MATERIALIZED (
+    SELECT
+        opportunity_id,
+        priority,
+        identifier_kind,
+        TRIM(identifier_value) AS identifier_value,
+        UPPER(TRIM(identifier_value)) AS identifier_value_norm,
+        identifier_kind IN (
+            'canonical_name',
+            'facility_operator_name',
+            'well_licensee',
+            'sk_legal_name',
+            'operator_short_name'
+        ) AS is_name_like_identifier
+    FROM operator_identifier_candidates_raw
+    WHERE identifier_value IS NOT NULL
+      AND TRIM(identifier_value) != ''
+      AND LOWER(TRIM(identifier_value)) NOT IN ('nan', 'none')
+),
+
+operator_lookup AS MATERIALIZED (
+    SELECT
+        identifier_kind,
+        TRIM(identifier_value) AS identifier_value,
+        UPPER(TRIM(identifier_value)) AS identifier_value_norm,
+        operator_id,
+        canonical_name,
+        short_name,
+        confidence
+    FROM operators_resolved
+    WHERE identifier_value IS NOT NULL
+      AND TRIM(identifier_value) != ''
+),
+
+operator_resolution_matches AS (
+    SELECT
+        c.opportunity_id,
+        c.priority,
+        r.operator_id,
+        r.canonical_name,
+        r.short_name,
+        r.identifier_kind AS operator_resolution_kind,
+        r.identifier_value AS operator_resolution_value,
+        r.confidence AS operator_resolution_confidence
+    FROM operator_identifier_candidates c
+    JOIN operator_lookup r
+      ON r.identifier_kind = c.identifier_kind
+     AND r.identifier_value = c.identifier_value
+    WHERE NOT c.is_name_like_identifier
+
+    UNION ALL
+
+    SELECT
+        c.opportunity_id,
+        c.priority,
+        r.operator_id,
+        r.canonical_name,
+        r.short_name,
+        r.identifier_kind AS operator_resolution_kind,
+        r.identifier_value AS operator_resolution_value,
+        r.confidence AS operator_resolution_confidence
+    FROM operator_identifier_candidates c
+    JOIN operator_lookup r
+      ON r.identifier_kind = c.identifier_kind
+     AND r.identifier_value_norm = c.identifier_value_norm
+    WHERE c.is_name_like_identifier
+),
+
 resolved_operator AS (
-    SELECT * EXCLUDE (rn)
+    SELECT
+        opportunity_id,
+        operator_id,
+        canonical_name,
+        short_name,
+        operator_resolution_kind,
+        operator_resolution_value,
+        operator_resolution_confidence
     FROM (
         SELECT
-            c.opportunity_id,
-            r.operator_id,
-            r.canonical_name,
-            r.short_name,
-            r.identifier_kind AS operator_resolution_kind,
-            r.identifier_value AS operator_resolution_value,
-            r.confidence AS operator_resolution_confidence,
+            m.opportunity_id,
+            m.operator_id,
+            m.canonical_name,
+            m.short_name,
+            m.operator_resolution_kind,
+            m.operator_resolution_value,
+            m.operator_resolution_confidence,
             ROW_NUMBER() OVER (
-                PARTITION BY c.opportunity_id
-                ORDER BY c.priority, r.confidence DESC, r.operator_id
+                PARTITION BY m.opportunity_id
+                ORDER BY m.priority, m.operator_resolution_confidence DESC, m.operator_id
             ) AS rn
-        FROM operator_identifier_candidates c
-        JOIN operators_resolved r
-          ON r.identifier_kind = c.identifier_kind
-         AND (
-             r.identifier_value = c.identifier_value
-             OR (
-                 c.identifier_kind IN (
-                     'canonical_name',
-                     'facility_operator_name',
-                     'well_licensee',
-                     'sk_legal_name',
-                     'operator_short_name'
-                 )
-                 AND UPPER(TRIM(r.identifier_value)) = UPPER(TRIM(c.identifier_value))
-             )
-         )
-        WHERE c.identifier_value IS NOT NULL
-          AND TRIM(c.identifier_value) != ''
-          AND LOWER(TRIM(c.identifier_value)) NOT IN ('nan', 'none')
+        FROM operator_resolution_matches m
     )
     WHERE rn = 1
 )

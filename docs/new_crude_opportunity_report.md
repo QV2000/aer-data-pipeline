@@ -340,6 +340,10 @@ operator.
 BA-code identifiers should match exactly. Name-like identifiers should also
 match case-insensitively because SK sources commonly store legal names in all
 caps, while `operator_identifiers.canonical_name` stores mixed-case names.
+Do not put `UPPER(TRIM(...))` directly on both sides of a large join predicate;
+materialize normalized candidate and lookup values first, then join on those
+raw CTE columns. Otherwise DuckDB can fall back to a very slow join plan during
+the export.
 
 Resolution priority:
 
