@@ -946,7 +946,19 @@ resolved_operator AS (
         FROM operator_identifier_candidates c
         JOIN operators_resolved r
           ON r.identifier_kind = c.identifier_kind
-         AND r.identifier_value = c.identifier_value
+         AND (
+             r.identifier_value = c.identifier_value
+             OR (
+                 c.identifier_kind IN (
+                     'canonical_name',
+                     'facility_operator_name',
+                     'well_licensee',
+                     'sk_legal_name',
+                     'operator_short_name'
+                 )
+                 AND UPPER(TRIM(r.identifier_value)) = UPPER(TRIM(c.identifier_value))
+             )
+         )
         WHERE c.identifier_value IS NOT NULL
           AND TRIM(c.identifier_value) != ''
           AND LOWER(TRIM(c.identifier_value)) NOT IN ('nan', 'none')

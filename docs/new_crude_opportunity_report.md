@@ -337,6 +337,10 @@ The report should resolve operator names through the warehouse
 single broad `OR` join, so each opportunity gets one deterministic canonical
 operator.
 
+BA-code identifiers should match exactly. Name-like identifiers should also
+match case-insensitively because SK sources commonly store legal names in all
+caps, while `operator_identifiers.canonical_name` stores mixed-case names.
+
 Resolution priority:
 
 1. AB 5-character BA code from the well/licensee source.
