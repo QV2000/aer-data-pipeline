@@ -42,22 +42,31 @@ multiwell_crude_facility_subtypes(sub_type) AS (
         ('506')  -- In-Situ Oil Sands
 ),
 
-wells_base AS (
+well_coords AS (
     SELECT
         uwi,
-        NULLIF(TRIM(name), '') AS well_name,
-        NULLIF(TRIM(licence), '') AS licence,
-        NULLIF(TRIM(lic_status), '') AS lic_status,
-        NULLIF(TRIM(licensee), '') AS raw_operator,
-        UPPER(NULLIF(TRIM(fluid), '')) AS fluid,
-        UPPER(NULLIF(TRIM(mode), '')) AS mode,
-        UPPER(NULLIF(TRIM(type), '')) AS well_type,
-        NULLIF(TRIM(structure), '') AS structure,
-        centroid_lat,
-        centroid_lon,
-        province,
-        CAST(release_date AS DATE) AS well_release_date
-    FROM wells_current
+        MAX(centroid_lat) AS centroid_lat,
+        MAX(centroid_lon) AS centroid_lon
+    FROM wells
+    GROUP BY uwi
+),
+
+wells_base AS (
+    SELECT
+        wc.uwi,
+        NULLIF(TRIM(wc.well_name), '') AS well_name,
+        NULLIF(TRIM(wc.licence_no), '') AS licence,
+        NULLIF(TRIM(wc.licence_status), '') AS lic_status,
+        COALESCE(NULLIF(TRIM(wc.licensee_name), ''), NULLIF(TRIM(wc.licensee_code), '')) AS raw_operator,
+        UPPER(NULLIF(TRIM(wc.fluid), '')) AS fluid,
+        UPPER(NULLIF(TRIM(wc.mode), '')) AS mode,
+        UPPER(NULLIF(TRIM(wc.type), '')) AS well_type,
+        NULLIF(TRIM(wc.structure), '') AS structure,
+        wcg.centroid_lat,
+        wcg.centroid_lon,
+        wc.province
+    FROM wells_current wc
+    LEFT JOIN well_coords wcg ON wcg.uwi = wc.uwi
 ),
 
 well_attr AS (
@@ -66,7 +75,7 @@ well_attr AS (
         field,
         field_name,
         pool_deposit,
-        formation,
+        COALESCE(NULLIF(TRIM(pool_deposit_name), ''), NULLIF(TRIM(pool_deposit), '')) AS formation,
         horizontal_drill,
         CAST(finished_drill_date AS DATE) AS finished_drill_date,
         CAST(spud_date AS DATE) AS attribute_spud_date,
@@ -91,7 +100,6 @@ facility_reach AS (
     SELECT
         facility_id,
         MAX(is_crude_connected) AS is_crude_connected,
-        MAX(crude_terminal_status) AS crude_terminal_status,
         MAX(nearest_hub_id) AS nearest_hub_id,
         MIN(hops_to_nearest_hub) AS hops_to_nearest_hub
     FROM facility_crude_reach
@@ -104,6 +112,7 @@ facility_context AS (
         MAX(facility_name) AS facility_name,
         MAX(operator_name) AS facility_operator_name,
         MAX(province) AS facility_province,
+        MAX(crude_terminal_status) AS crude_terminal_status,
         MAX(centroid_lat) AS facility_lat,
         MAX(centroid_lon) AS facility_lon
     FROM facilities_enriched
@@ -113,15 +122,20 @@ facility_context AS (
 production_clean AS (
     SELECT
         uwi,
-        CAST(prod_month AS DATE) AS prod_month,
+        CASE
+            WHEN TRY_CAST(productionmonth AS DATE) IS NOT NULL THEN TRY_CAST(productionmonth AS DATE)
+            WHEN LENGTH(CAST(productionmonth AS VARCHAR)) = 7 THEN
+                CAST(CAST(productionmonth AS VARCHAR) || '-01' AS DATE)
+            ELSE NULL
+        END AS prod_month,
         COALESCE(oil_prod_vol, 0)::DOUBLE AS oil_prod_vol,
         COALESCE(gas_prod_vol, 0)::DOUBLE AS gas_prod_vol,
         COALESCE(water_prod_vol, 0)::DOUBLE AS water_prod_vol,
-        COALESCE(cond_prod_vol, 0)::DOUBLE AS cond_prod_vol,
-        COALESCE(hours_on, 0)::DOUBLE AS hours_on
+        COALESCE(COND, 0)::DOUBLE AS cond_prod_vol,
+        CAST(NULL AS DOUBLE) AS hours_on
     FROM production_history
     WHERE uwi IS NOT NULL
-      AND prod_month IS NOT NULL
+      AND productionmonth IS NOT NULL
 ),
 
 first_oil AS (
@@ -131,6 +145,7 @@ first_oil AS (
     FROM production_clean pc
     CROSS JOIN params p
     WHERE pc.oil_prod_vol >= p.oil_threshold_m3
+      AND pc.prod_month IS NOT NULL
     GROUP BY pc.uwi
 ),
 
@@ -251,15 +266,6 @@ release_events AS (
     FROM confidential_wells cw
     WHERE cw.uwi IS NOT NULL
       AND cw.release_date IS NOT NULL
-
-    UNION ALL
-
-    SELECT
-        wb.uwi,
-        wb.well_release_date AS release_date
-    FROM wells_base wb
-    WHERE wb.uwi IS NOT NULL
-      AND wb.well_release_date IS NOT NULL
 ),
 
 release_context AS (
@@ -318,13 +324,13 @@ well_context AS (
         wa.linked_facility_identifier,
         wa.linked_start_date,
         fr.is_crude_connected,
-        fr.crude_terminal_status,
+        fc.crude_terminal_status,
         fr.nearest_hub_id,
         fr.hops_to_nearest_hub,
         CASE
             WHEN fr.is_crude_connected THEN
                 'crude connected'
-                || COALESCE(' / terminal: ' || fr.crude_terminal_status, '')
+                || COALESCE(' / terminal: ' || fc.crude_terminal_status, '')
                 || COALESCE(' / hub: ' || fr.nearest_hub_id, '')
                 || COALESCE(' / hops: ' || fr.hops_to_nearest_hub::VARCHAR, '')
             WHEN fr.facility_id IS NOT NULL THEN 'not crude connected'
@@ -420,13 +426,13 @@ battery_context AS (
         MAX(wa.linked_facility_identifier) AS linked_facility_identifier,
         MIN(wa.linked_start_date) AS linked_start_date,
         MAX(fr.is_crude_connected) AS is_crude_connected,
-        MAX(fr.crude_terminal_status) AS crude_terminal_status,
+        MAX(fc.crude_terminal_status) AS crude_terminal_status,
         MAX(fr.nearest_hub_id) AS nearest_hub_id,
         MAX(fr.hops_to_nearest_hub) AS hops_to_nearest_hub,
         CASE
             WHEN MAX(fr.is_crude_connected) THEN
                 'crude connected'
-                || COALESCE(' / terminal: ' || MAX(fr.crude_terminal_status), '')
+                || COALESCE(' / terminal: ' || MAX(fc.crude_terminal_status), '')
                 || COALESCE(' / hub: ' || MAX(fr.nearest_hub_id), '')
                 || COALESCE(' / hops: ' || MAX(fr.hops_to_nearest_hub)::VARCHAR, '')
             WHEN MAX(fr.facility_id) IS NOT NULL THEN 'not crude connected'
@@ -491,7 +497,7 @@ spud_candidates AS (
         sa.uwi,
         wa.linked_facility_id,
         CAST(sa.spud_date AS DATE) AS spud_date,
-        sa.target_formation,
+        wa.formation AS target_formation,
         CASE
             WHEN wa.linked_facility_sub_type IS NOT NULL THEN
                 wa.linked_facility_sub_type IN (SELECT sub_type FROM crude_facility_subtypes)

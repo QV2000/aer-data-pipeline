@@ -15,25 +15,28 @@ import duckdb
 REQUIRED_TABLES: dict[str, set[str]] = {
     "wells_current": {
         "uwi",
-        "name",
-        "licence",
-        "lic_status",
-        "licensee",
+        "well_name",
+        "licence_no",
+        "licence_status",
+        "licensee_code",
+        "licensee_name",
         "fluid",
         "mode",
         "type",
         "structure",
+        "province",
+    },
+    "wells": {
+        "uwi",
         "centroid_lat",
         "centroid_lon",
-        "province",
-        "release_date",
     },
     "well_attributes": {
         "uwi",
         "field",
         "field_name",
         "pool_deposit",
-        "formation",
+        "pool_deposit_name",
         "horizontal_drill",
         "finished_drill_date",
         "spud_date",
@@ -54,21 +57,19 @@ REQUIRED_TABLES: dict[str, set[str]] = {
     },
     "production_history": {
         "uwi",
-        "prod_month",
+        "productionmonth",
         "oil_prod_vol",
         "gas_prod_vol",
         "water_prod_vol",
-        "cond_prod_vol",
-        "hours_on",
+        "COND",
     },
     "well_licences": {"uwi", "well_name", "licensee", "issue_date", "well_completion_type"},
-    "spud_activity": {"uwi", "spud_date", "target_formation"},
+    "spud_activity": {"uwi", "spud_date"},
     "status_changes": {"uwi", "event_date", "new_status"},
     "confidential_wells": {"uwi", "release_date"},
     "facility_crude_reach": {
         "facility_id",
         "is_crude_connected",
-        "crude_terminal_status",
         "nearest_hub_id",
         "hops_to_nearest_hub",
     },
@@ -77,6 +78,7 @@ REQUIRED_TABLES: dict[str, set[str]] = {
         "facility_name",
         "operator_name",
         "province",
+        "crude_terminal_status",
         "centroid_lat",
         "centroid_lon",
     },
@@ -207,10 +209,26 @@ def run_report(conn: duckdb.DuckDBPyConnection, sql: str, sample_limit: int) -> 
     first_oil_linkage = rows_as_dicts(
         conn.execute(
             """
-            WITH first_oil AS (
-                SELECT uwi, MIN(prod_month) AS first_oil_month
+            WITH production_clean AS (
+                SELECT
+                    uwi,
+                    CASE
+                        WHEN TRY_CAST(productionmonth AS DATE) IS NOT NULL THEN
+                            TRY_CAST(productionmonth AS DATE)
+                        WHEN LENGTH(CAST(productionmonth AS VARCHAR)) = 7 THEN
+                            CAST(CAST(productionmonth AS VARCHAR) || '-01' AS DATE)
+                        ELSE NULL
+                    END AS prod_month,
+                    COALESCE(oil_prod_vol, 0) AS oil_prod_vol
                 FROM production_history
+                WHERE uwi IS NOT NULL
+                  AND productionmonth IS NOT NULL
+            ),
+            first_oil AS (
+                SELECT uwi, MIN(prod_month) AS first_oil_month
+                FROM production_clean
                 WHERE oil_prod_vol >= 1.0
+                  AND prod_month IS NOT NULL
                 GROUP BY uwi
             )
             SELECT COUNT(*) AS first_oil_wells,
