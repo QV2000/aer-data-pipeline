@@ -149,7 +149,7 @@ SELECT
         THEN TRUE
         ELSE FALSE
     END AS is_production_momentum,
-    *
+    * EXCLUDE (latest_gas_e3m3)
 FROM new_crude_opportunity_report;
 
 CREATE OR REPLACE VIEW new_crude_weekly_contact_queue AS
@@ -193,7 +193,6 @@ SELECT
     first_oil_month,
     latest_prod_month,
     latest_oil_m3,
-    latest_gas_e3m3,
     latest_water_m3,
     centroid_lat,
     centroid_lon,
@@ -336,7 +335,6 @@ SELECT
     first_oil_month,
     latest_prod_month,
     latest_oil_m3,
-    latest_gas_e3m3,
     latest_water_m3,
     latest_cond_m3,
     is_crude_connected,

@@ -329,6 +329,34 @@ latest_licence AS (
     WHERE rn = 1
 ),
 
+well_crude_screen AS (
+    SELECT
+        COALESCE(wb.uwi, wa.uwi, ll.uwi) AS uwi,
+        CASE
+            WHEN wa.linked_facility_sub_type IS NOT NULL THEN
+                wa.linked_facility_sub_type IN (SELECT sub_type FROM crude_facility_subtypes)
+            ELSE
+                COALESCE(wb.fluid, '') LIKE 'CR-%'
+                OR COALESCE(wb.fluid, '') LIKE '%OIL%'
+                OR COALESCE(wb.well_type, '') LIKE '%OIL%'
+                OR COALESCE(wa.well_status_fluid, '') LIKE 'CR-%'
+                OR LOWER(COALESCE(ll.well_completion_type, '')) LIKE '%oil%'
+        END AS has_crude_evidence,
+        CASE
+            WHEN wa.linked_facility_sub_type IS NOT NULL THEN
+                wa.linked_facility_sub_type NOT IN (SELECT sub_type FROM crude_facility_subtypes)
+            ELSE
+                COALESCE(wb.fluid, '') LIKE 'GAS%'
+                OR COALESCE(wb.fluid, '') LIKE '%WAT%'
+                OR COALESCE(wb.well_type, '') IN ('GAS', 'WAT', 'WATER', 'INJ')
+                OR COALESCE(wa.well_status_fluid, '') LIKE 'GAS%'
+        END AS has_non_crude_evidence
+    FROM wells_base wb
+    FULL OUTER JOIN well_attr wa ON wa.uwi = wb.uwi
+    FULL OUTER JOIN latest_licence ll ON ll.uwi = COALESCE(wb.uwi, wa.uwi)
+    WHERE COALESCE(wb.uwi, wa.uwi, ll.uwi) IS NOT NULL
+),
+
 licence_context AS (
     SELECT
         wl.uwi,
@@ -610,22 +638,14 @@ licence_signal AS (
         'Add to prospecting list; verify spud and operator contact.' AS recommended_action,
         COALESCE(wl.well_completion_type, wa.linked_facility_sub_type_desc) AS source_detail
     FROM well_licences wl
-    LEFT JOIN wells_base wb ON wb.uwi = wl.uwi
     LEFT JOIN well_attr wa ON wa.uwi = wl.uwi
+    LEFT JOIN well_crude_screen wcs ON wcs.uwi = wl.uwi
     CROSS JOIN params p
     WHERE wl.uwi IS NOT NULL
       AND CAST(wl.issue_date AS DATE) >= p.report_cutoff
       AND CAST(wl.issue_date AS DATE) <= p.as_of_date
-      AND (
-          CASE
-              WHEN wa.linked_facility_sub_type IS NOT NULL THEN
-                  wa.linked_facility_sub_type IN (SELECT sub_type FROM crude_facility_subtypes)
-              ELSE
-                  LOWER(COALESCE(wl.well_completion_type, '')) LIKE '%oil%'
-                  OR COALESCE(wb.fluid, '') LIKE 'CR-%'
-                  OR COALESCE(wb.well_type, '') LIKE '%OIL%'
-          END
-      )
+      AND COALESCE(wcs.has_crude_evidence, FALSE)
+      AND NOT COALESCE(wcs.has_non_crude_evidence, FALSE)
 ),
 
 spud_candidates AS (
@@ -634,29 +654,11 @@ spud_candidates AS (
         wa.linked_facility_id,
         CAST(sa.spud_date AS DATE) AS spud_date,
         wa.formation AS target_formation,
-        CASE
-            WHEN wa.linked_facility_sub_type IS NOT NULL THEN
-                wa.linked_facility_sub_type IN (SELECT sub_type FROM crude_facility_subtypes)
-            ELSE
-                COALESCE(wb.fluid, '') LIKE 'CR-%'
-                OR COALESCE(wb.fluid, '') LIKE '%OIL%'
-                OR COALESCE(wb.well_type, '') LIKE '%OIL%'
-                OR COALESCE(wa.well_status_fluid, '') LIKE 'CR-%'
-                OR LOWER(COALESCE(ll.well_completion_type, '')) LIKE '%oil%'
-        END AS has_crude_evidence,
-        CASE
-            WHEN wa.linked_facility_sub_type IS NOT NULL THEN
-                wa.linked_facility_sub_type NOT IN (SELECT sub_type FROM crude_facility_subtypes)
-            ELSE
-                COALESCE(wb.fluid, '') LIKE 'GAS%'
-                OR COALESCE(wb.fluid, '') LIKE '%WAT%'
-                OR COALESCE(wb.well_type, '') IN ('GAS', 'WAT', 'WATER', 'INJ')
-                OR COALESCE(wa.well_status_fluid, '') LIKE 'GAS%'
-        END AS has_non_crude_evidence
+        COALESCE(wcs.has_crude_evidence, FALSE) AS has_crude_evidence,
+        COALESCE(wcs.has_non_crude_evidence, FALSE) AS has_non_crude_evidence
     FROM spud_activity sa
-    LEFT JOIN wells_base wb ON wb.uwi = sa.uwi
     LEFT JOIN well_attr wa ON wa.uwi = sa.uwi
-    LEFT JOIN latest_licence ll ON ll.uwi = sa.uwi
+    LEFT JOIN well_crude_screen wcs ON wcs.uwi = sa.uwi
     CROSS JOIN params p
     WHERE sa.uwi IS NOT NULL
       AND CAST(sa.spud_date AS DATE) >= p.report_cutoff
@@ -706,6 +708,7 @@ status_signal AS (
         sc.new_status AS source_detail
     FROM status_changes sc
     LEFT JOIN well_attr wa ON wa.uwi = sc.uwi
+    LEFT JOIN well_crude_screen wcs ON wcs.uwi = sc.uwi
     CROSS JOIN params p
     WHERE sc.uwi IS NOT NULL
       AND CAST(sc.event_date AS DATE) >= p.report_cutoff
@@ -717,6 +720,7 @@ status_signal AS (
       AND UPPER(sc.new_status) NOT LIKE '%ABD%'
       AND UPPER(sc.new_status) NOT LIKE '%ABAN%'
       AND UPPER(sc.new_status) NOT LIKE '%SUSP%'
+      AND NOT COALESCE(wcs.has_non_crude_evidence, FALSE)
 ),
 
 release_signal AS (
@@ -733,9 +737,11 @@ release_signal AS (
         'confidential release' AS source_detail
     FROM release_events re
     LEFT JOIN well_attr wa ON wa.uwi = re.uwi
+    LEFT JOIN well_crude_screen wcs ON wcs.uwi = re.uwi
     CROSS JOIN params p
     WHERE re.release_date >= p.report_cutoff
       AND re.release_date <= p.as_of_date
+      AND NOT COALESCE(wcs.has_non_crude_evidence, FALSE)
 ),
 
 new_battery_first_oil_signal AS (
@@ -767,12 +773,14 @@ first_oil_signal AS (
         'first oil production month' AS source_detail
     FROM first_oil fo
     LEFT JOIN well_attr wa ON wa.uwi = fo.uwi
+    LEFT JOIN well_crude_screen wcs ON wcs.uwi = fo.uwi
     LEFT JOIN battery_first_oil_members bm
       ON bm.uwi = fo.uwi
      AND bm.first_oil_month = fo.first_oil_month
     CROSS JOIN params p
     WHERE fo.first_oil_month >= p.production_cutoff
       AND bm.uwi IS NULL
+      AND NOT COALESCE(wcs.has_non_crude_evidence, FALSE)
 ),
 
 production_restart_signal AS (
@@ -790,6 +798,7 @@ production_restart_signal AS (
     FROM production_lag pl
     LEFT JOIN first_oil fo ON fo.uwi = pl.uwi
     LEFT JOIN well_attr wa ON wa.uwi = pl.uwi
+    LEFT JOIN well_crude_screen wcs ON wcs.uwi = pl.uwi
     CROSS JOIN params p
     WHERE pl.prod_month >= p.production_cutoff
       AND pl.oil_prod_vol >= p.oil_threshold_m3
@@ -797,6 +806,7 @@ production_restart_signal AS (
       AND pl.oil_prev_2 < p.oil_threshold_m3
       AND pl.oil_prev_3 < p.oil_threshold_m3
       AND fo.first_oil_month < pl.prod_month
+      AND NOT COALESCE(wcs.has_non_crude_evidence, FALSE)
 ),
 
 production_step_change_signal AS (
@@ -814,12 +824,14 @@ production_step_change_signal AS (
     FROM production_lag pl
     LEFT JOIN first_oil fo ON fo.uwi = pl.uwi
     LEFT JOIN well_attr wa ON wa.uwi = pl.uwi
+    LEFT JOIN well_crude_screen wcs ON wcs.uwi = pl.uwi
     CROSS JOIN params p
     WHERE pl.prod_month >= p.production_cutoff
       AND pl.oil_prod_vol >= 10
       AND COALESCE(pl.oil_prior_3mo_avg, 0) >= p.oil_threshold_m3
       AND pl.oil_prod_vol >= 2 * pl.oil_prior_3mo_avg
       AND fo.first_oil_month < pl.prod_month
+      AND NOT COALESCE(wcs.has_non_crude_evidence, FALSE)
 ),
 
 all_signals AS (

@@ -436,6 +436,11 @@ temporary tables in the DuckDB session. This is intentional: the base
 opportunity report is expensive, and keeping all five workbook sheets as chained
 views would re-run that base report multiple times.
 
+The report applies a shared crude screen before emitting signals. Rows with
+explicit non-crude evidence, such as gas-linked facility subtypes or gas/water
+well classifications, are excluded. Unknown-fluid spuds/releases can still land
+in the watchlist only when there is no explicit gas/non-crude evidence.
+
 The workbook sheets are:
 
 - `weekly_contact_queue`

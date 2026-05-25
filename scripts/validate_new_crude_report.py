@@ -500,6 +500,21 @@ def run_report(conn: duckdb.DuckDBPyConnection, sql: str, sample_limit: int) -> 
         )
     )
 
+    gas_leakage = rows_as_dicts(
+        conn.execute(
+            """
+            SELECT primary_signal,
+                   COUNT(*) AS rows
+            FROM new_crude_opportunity_report
+            WHERE UPPER(COALESCE(linked_facility_sub_type_desc, '')) LIKE '%GAS%'
+               OR UPPER(COALESCE(fluid, '')) LIKE 'GAS%'
+               OR UPPER(COALESCE(well_type, '')) IN ('GAS', 'WAT', 'WATER', 'INJ')
+            GROUP BY primary_signal
+            ORDER BY rows DESC
+            """
+        )
+    )
+
     sample_rows = rows_as_dicts(
         conn.execute(
             """
@@ -528,6 +543,7 @@ def run_report(conn: duckdb.DuckDBPyConnection, sql: str, sample_limit: int) -> 
         "first_oil_linkage": first_oil_linkage,
         "first_oil_by_month": first_oil_by_month,
         "battery_subtypes": battery_subtypes,
+        "gas_leakage": gas_leakage,
         "sample_rows": sample_rows,
     }
 
@@ -568,6 +584,13 @@ def print_text(result: dict[str, Any]) -> None:
             print(f"- {row}")
     else:
         print("- No NEW_BATTERY_FIRST_OIL rows")
+
+    print("\nGas/non-crude leakage check")
+    if result["gas_leakage"]:
+        for row in result["gas_leakage"]:
+            print(f"- {row}")
+    else:
+        print("- No explicit gas/non-crude rows found")
 
     print("\nSample rows")
     for row in result["sample_rows"]:
