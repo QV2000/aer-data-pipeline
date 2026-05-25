@@ -930,15 +930,35 @@ expanded_events AS (
     FROM candidate_opportunities
     WHERE primary_signal IN ('PRODUCTION_RESTART', 'PRODUCTION_STEP_CHANGE')
 ),
+timeline_window AS (
+    SELECT
+        CURRENT_DATE::DATE AS as_of_date,
+        (CURRENT_DATE - INTERVAL 7 DAY)::DATE AS week_cutoff
+),
 ranked_events AS (
     SELECT
-        *,
+        ee.*,
+        tw.week_cutoff,
+        tw.as_of_date,
         ROW_NUMBER() OVER (
-            PARTITION BY operator_key, category
-            ORDER BY event_date DESC, contact_priority_score DESC, opportunity_id, event_type
+            PARTITION BY ee.operator_key, ee.category
+            ORDER BY ee.event_date DESC, ee.contact_priority_score DESC, ee.opportunity_id, ee.event_type
         ) AS event_rank
-    FROM expanded_events
-    WHERE event_date IS NOT NULL
+    FROM expanded_events ee
+    CROSS JOIN timeline_window tw
+    WHERE ee.event_date IS NOT NULL
+      -- For weekly-activity cards, only surface events that happened in the
+      -- 7-day window. Historical lifecycle dates (e.g. an old first oil for
+      -- a well that just got a new spud) are excluded to keep the digest
+      -- focused on "what happened this week".
+      AND (
+          ee.category = 'production_mover'
+          OR (
+              ee.category IN ('new_operator', 'near_facility')
+              AND ee.event_date >= tw.week_cutoff
+              AND ee.event_date <= tw.as_of_date
+          )
+      )
 )
 SELECT
     operator_key,

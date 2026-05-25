@@ -8,7 +8,16 @@
             <tr>
               <td style="padding:24px 24px 18px 24px; border-bottom:1px solid #e5eaf0;">
                 <h1 style="margin:0 0 8px 0; font-size:24px; line-height:30px; color:#17212b; font-weight:700;">This week in the patch</h1>
-                <div style="font-size:14px; line-height:21px; color:#52606d;">{{ counts.new_operator }} new operators &middot; {{ counts.near_facility }} operators with new activity within 100km &middot; {{ counts.production_mover }} production movers</div>
+                <div style="font-size:14px; line-height:21px; color:#52606d;">
+                  {%- set header_bits = [] -%}
+                  {%- if counts.new_operator -%}
+                    {%- set _ = header_bits.append(counts.new_operator ~ ' new ' ~ ('operator' if counts.new_operator == 1 else 'operators')) -%}
+                  {%- endif -%}
+                  {%- if counts.near_facility -%}
+                    {%- set _ = header_bits.append(counts.near_facility ~ ' ' ~ ('operator' if counts.near_facility == 1 else 'operators') ~ ' with new activity within 100km') -%}
+                  {%- endif -%}
+                  {%- if header_bits -%}{{ header_bits | join(' &middot; ') | safe }}{%- else -%}No new crude operator activity matched the digest filters for this period.{%- endif -%}
+                </div>
               </td>
             </tr>
 
@@ -34,21 +43,6 @@
               </td>
             </tr>
             {% for operator in sections.near_facility %}
-            <tr>
-              <td style="padding:10px 24px 14px 24px;">
-                {% include "_weekly_digest_card.html.j2" %}
-              </td>
-            </tr>
-            {% endfor %}
-            {% endif %}
-
-            {% if sections.production_mover %}
-            <tr>
-              <td style="padding:22px 24px 4px 24px;">
-                <h2 style="margin:0; font-size:17px; line-height:24px; color:#17212b;">Production movers</h2>
-              </td>
-            </tr>
-            {% for operator in sections.production_mover %}
             <tr>
               <td style="padding:10px 24px 14px 24px;">
                 {% include "_weekly_digest_card.html.j2" %}
