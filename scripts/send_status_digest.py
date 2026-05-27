@@ -20,9 +20,13 @@ from __future__ import annotations
 import argparse
 import os
 import re
+import smtplib
+import ssl
 import sys
 from collections import defaultdict
 from datetime import date, datetime, timedelta
+from email.message import EmailMessage
+from email.utils import formataddr
 from pathlib import Path
 from typing import Any
 
@@ -63,7 +67,77 @@ def parse_args() -> argparse.Namespace:
         default=100.0,
         help="Only include wells within this distance (km) of any TEMI facility. Default 100.",
     )
+    parser.add_argument(
+        "--send",
+        action="store_true",
+        help="Send the digest via SMTP instead of just writing the preview HTML.",
+    )
+    parser.add_argument(
+        "--recipient",
+        action="append",
+        default=None,
+        help="Email recipient. Can be passed multiple times. Defaults to DIGEST_RECIPIENTS env var.",
+    )
+    parser.add_argument(
+        "--env-file",
+        default="/data/.env.digest",
+        help="Path to env file with SMTP creds. Default: /data/.env.digest",
+    )
+    parser.add_argument(
+        "--subject",
+        default=None,
+        help="Override the email subject line.",
+    )
     return parser.parse_args()
+
+
+def load_env_file(path: Path) -> None:
+    """Load KEY=VALUE lines from an env file into os.environ (no-op if missing)."""
+    if not path.exists():
+        return
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        os.environ.setdefault(key.strip(), value.strip())
+
+
+def send_email(
+    *,
+    html_body: str,
+    subject: str,
+    recipients: list[str],
+) -> None:
+    """Send the digest via SMTP. Reads SMTP_* from env."""
+    smtp_host = os.environ.get("SMTP_HOST", "smtp.gmail.com")
+    smtp_port = int(os.environ.get("SMTP_PORT", "587"))
+    smtp_user = os.environ.get("SMTP_USER")
+    smtp_password = os.environ.get("SMTP_PASSWORD")
+    from_name = os.environ.get("SMTP_FROM_NAME", "TrendEnergy Radar")
+    if not smtp_user or not smtp_password:
+        raise RuntimeError(
+            "SMTP_USER and SMTP_PASSWORD must be set (via env or --env-file)."
+        )
+
+    msg = EmailMessage()
+    msg["From"] = formataddr((from_name, smtp_user))
+    msg["To"] = ", ".join(recipients)
+    msg["Subject"] = subject
+    # Plain-text fallback (very minimal — most clients show HTML)
+    msg.set_content(
+        "This email contains an HTML-rendered TrendEnergy crude-radar digest. "
+        "If you can't see it, view in an HTML-capable client."
+    )
+    msg.add_alternative(html_body, subtype="html")
+
+    context = ssl.create_default_context()
+    with smtplib.SMTP(smtp_host, smtp_port, timeout=30) as server:
+        server.ehlo()
+        server.starttls(context=context)
+        server.ehlo()
+        server.login(smtp_user, smtp_password)
+        server.send_message(msg)
 
 
 def lsd_label_from_uwi(uwi: str | None) -> str:
@@ -309,6 +383,33 @@ def main() -> int:
     print(f"- {context['operator_count']} operators, {context['total_wells']} wells")
     for label, n in pattern_counts.items():
         print(f"  - {label}: {n}")
+
+    if args.send:
+        load_env_file(Path(args.env_file))
+        recipients = args.recipient or [
+            r.strip() for r in os.environ.get("DIGEST_RECIPIENTS", "").split(",") if r.strip()
+        ]
+        if not recipients:
+            print(
+                "ERROR: --send requested but no recipients. Pass --recipient or set DIGEST_RECIPIENTS.",
+                file=sys.stderr,
+            )
+            return 3
+        if args.subject:
+            subject = args.subject
+        else:
+            window_label = anchor_date.strftime("%b %d") if anchor_date else "latest"
+            subject = (
+                f"TrendEnergy crude radar — {context['total_wells']} wells, "
+                f"week of {window_label}"
+            )
+        try:
+            send_email(html_body=html, subject=subject, recipients=recipients)
+            print(f"Sent to {len(recipients)} recipient(s): {', '.join(recipients)}")
+        except Exception as e:
+            print(f"ERROR: SMTP send failed: {e}", file=sys.stderr)
+            return 4
+
     return 0
 
 
