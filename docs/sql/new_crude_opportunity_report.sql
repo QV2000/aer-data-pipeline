@@ -235,6 +235,14 @@ production_bounds AS (
     FROM production_clean
 ),
 
+status_bounds AS (
+    -- status_changes bronze can lag the wall clock by a week or more.
+    -- Anchor the status-signal window to the latest event_date actually in
+    -- the table so notifications don't go silent during ETL gaps.
+    SELECT MAX(CAST(event_date AS DATE)) AS latest_status_event_date
+    FROM status_changes
+),
+
 params AS (
     SELECT
         bp.*,
@@ -242,9 +250,14 @@ params AS (
         (
             COALESCE(pb.latest_production_month, DATE_TRUNC('month', bp.as_of_date)::DATE)
             - INTERVAL 5 MONTH
-        )::DATE AS production_cutoff
+        )::DATE AS production_cutoff,
+        COALESCE(sb.latest_status_event_date, bp.as_of_date)::DATE AS status_anchor_date,
+        (
+            COALESCE(sb.latest_status_event_date, bp.as_of_date) - INTERVAL 7 DAY
+        )::DATE AS status_window_cutoff
     FROM base_params bp
     CROSS JOIN production_bounds pb
+    CROSS JOIN status_bounds sb
 ),
 
 first_oil AS (
@@ -386,7 +399,7 @@ status_events AS (
     SELECT
         sc.uwi,
         CAST(sc.event_date AS DATE) AS status_active_date,
-        NULLIF(TRIM(sc.prev_status), '') AS status_prev_status,
+        NULLIF(TRIM(sc.old_status), '') AS status_prev_status,
         NULLIF(TRIM(sc.new_status), '') AS status_new_status
     FROM status_changes sc
     CROSS JOIN params p
@@ -756,6 +769,16 @@ spud_signal AS (
 ),
 
 status_signal AS (
+    -- Focused notification set: only the high-value status transitions a rep
+    -- can act on. Each pair below corresponds to a specific sales motion:
+    --   DRL&C       -> CR-OIL PUMP : new crude well coming online (pump)
+    --   DRL&C       -> CR-BIT PUMP : new bitumen well coming online (pump)
+    --   DRL&C       -> CR-OIL FLOW : new crude well flowing
+    --   CR-OIL SUSP -> CR-OIL PUMP : reactivation of a suspended crude well
+    -- Mode flips between productive states (e.g. CR-OIL FLOW -> CR-OIL PUMP)
+    -- are intentionally excluded — they don't represent a new marketing
+    -- opportunity. Window is anchored to MAX(status_changes.event_date) via
+    -- status_window_cutoff so notifications survive ETL lag.
     SELECT
         'WELL:' || se.uwi AS opportunity_id,
         'WELL' AS opportunity_type,
@@ -772,8 +795,14 @@ status_signal AS (
     LEFT JOIN well_crude_screen wcs ON wcs.uwi = se.uwi
     CROSS JOIN params p
     WHERE se.uwi IS NOT NULL
-      AND se.status_active_date >= p.report_cutoff
-      AND se.status_active_date <= p.as_of_date
+      AND se.status_active_date >= p.status_window_cutoff
+      AND se.status_active_date <= p.status_anchor_date
+      AND (
+          (UPPER(se.status_prev_status) = 'DRL&C'       AND UPPER(se.status_new_status) = 'CR-OIL PUMP')
+          OR (UPPER(se.status_prev_status) = 'DRL&C'    AND UPPER(se.status_new_status) = 'CR-BIT PUMP')
+          OR (UPPER(se.status_prev_status) = 'DRL&C'    AND UPPER(se.status_new_status) = 'CR-OIL FLOW')
+          OR (UPPER(se.status_prev_status) = 'CR-OIL SUSP' AND UPPER(se.status_new_status) = 'CR-OIL PUMP')
+      )
       AND NOT COALESCE(wcs.has_non_crude_evidence, FALSE)
 ),
 
