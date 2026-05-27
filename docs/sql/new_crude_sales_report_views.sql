@@ -66,9 +66,9 @@ SELECT
         THEN 'Previously confidential well is newly visible; prioritize operator research before monthly production confirms.'
         WHEN primary_signal = 'ACTIVE_CRUDE_STATUS'
              AND first_oil_month IS NOT NULL
-        THEN 'Active crude status is already production-backed; review latest volume and facility context.'
+        THEN 'Well is producing crude — review latest volume and facility context.'
         WHEN primary_signal = 'ACTIVE_CRUDE_STATUS'
-        THEN 'Well reached active crude status; review before Petrinex monthly volume appears.'
+        THEN 'Well just started producing crude — call operator before Petrinex monthly volume lands.'
         WHEN primary_signal = 'SPUD_CRUDE_LIKELY'
         THEN 'Drilling started with crude evidence; add to early operator review.'
         WHEN primary_signal = 'LICENCE_OIL'
@@ -102,7 +102,7 @@ SELECT
         WHEN first_oil_month IS NULL AND confidential_release_date IS NOT NULL
         THEN 'status change or first production'
         WHEN first_oil_month IS NULL AND spud_date IS NOT NULL
-        THEN 'active crude status'
+        THEN 'well to start producing'
         WHEN first_oil_month IS NULL AND licence_date IS NOT NULL
         THEN 'spud or drilling activity'
         WHEN primary_signal IN ('NEW_BATTERY_FIRST_OIL', 'FIRST_CONFIRMED_OIL')
@@ -850,7 +850,7 @@ expanded_events AS (
         category,
         status_active_date AS event_date,
         'ACTIVE_CRUDE_STATUS' AS event_type,
-        COALESCE(status_transition_detail, 'now active crude') AS event_detail,
+        COALESCE(status_transition_detail, 'well now producing crude') AS event_detail,
         COALESCE(lsd_label, well_name, opportunity_id) AS well_or_battery_label,
         contact_priority_score,
         opportunity_id

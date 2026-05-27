@@ -290,9 +290,9 @@ def format_distance(value: Any) -> str:
 def format_signal_label(value: Any) -> str:
     labels = {
         "LICENCE_OIL": "Licence issued",
-        "SPUD_CRUDE_LIKELY": "Spud",
-        "SPUD_UNKNOWN_FLUID": "Spud",
-        "ACTIVE_CRUDE_STATUS": "Active crude status",
+        "SPUD_CRUDE_LIKELY": "Drilling started",
+        "SPUD_UNKNOWN_FLUID": "Drilling started",
+        "ACTIVE_CRUDE_STATUS": "Well started producing crude",
         "CONFIDENTIAL_RELEASE": "Confidentiality released",
         "FIRST_CONFIRMED_OIL": "First oil confirmed",
         "NEW_BATTERY_FIRST_OIL": "First oil confirmed",
