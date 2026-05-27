@@ -15,6 +15,7 @@
                 </h1>
                 <div style="font-size:14px; line-height:21px; color:#52606d;">
                   {{ total_wells }} wells across {{ operator_count }} operators &middot;
+                  within {{ max_km|int }} km of any TEMI facility &middot;
                   window {{ window_start|date_label }} to {{ anchor_date|date_label }}
                 </div>
                 {% if pattern_counts %}
@@ -55,6 +56,9 @@
                       <span style="color:#52606d;">&nbsp;·&nbsp;</span>
                       <span style="font-family:Consolas, Menlo, monospace;">{{ well.lsd or well.uwi }}</span>
                       <span style="color:#52606d;">&nbsp;·&nbsp;{{ well.event_date|date_label }}</span>
+                      {% if well.distance_km is not none and well.nearest_facility_name %}
+                      <span style="color:#52606d;">&nbsp;·&nbsp;{{ well.distance_km }} km from {{ well.nearest_facility_name }}</span>
+                      {% endif %}
                       {% if well.well_name and well.well_name != well.lsd %}
                       <div style="margin-left:14px; font-size:12px; color:#7e8a99;">{{ well.well_name }}</div>
                       {% endif %}

@@ -57,6 +57,12 @@ def parse_args() -> argparse.Namespace:
         default=28,
         help="Window size in days (anchored to MAX(event_date) in status_changes). Default 28.",
     )
+    parser.add_argument(
+        "--max-km",
+        type=float,
+        default=100.0,
+        help="Only include wells within this distance (km) of any TEMI facility. Default 100.",
+    )
     return parser.parse_args()
 
 
@@ -67,11 +73,19 @@ def lsd_label_from_uwi(uwi: str | None) -> str:
     return match.group(1) if match else uwi
 
 
-def fetch_transitions(conn: duckdb.DuckDBPyConnection, days: int) -> list[dict[str, Any]]:
+def fetch_transitions(conn: duckdb.DuckDBPyConnection, days: int, max_km: float) -> list[dict[str, Any]]:
     rows = conn.execute(
         """
         WITH bounds AS (
             SELECT MAX(CAST(event_date AS DATE)) AS anchor_date FROM status_changes
+        ),
+        temi_facilities(facility_id, facility_name, lat, lon) AS (
+            VALUES
+                ('ABTM0000930', 'Cynthia Pembina',                53.310727, -115.619797),
+                ('ABTM0112311', 'Rush Energy Services',           53.099561, -114.474046),
+                ('ABTM0125201', 'Vermilion 15-16-051-11W5',       53.408441, -115.558574),
+                ('ABTM0157119', 'Persist Wayne',                  51.403331, -112.914700),
+                ('SKTMTT15003', 'Dulwich',                        53.165195, -109.703831)
         ),
         matches AS (
             SELECT
@@ -99,9 +113,37 @@ def fetch_transitions(conn: duckdb.DuckDBPyConnection, days: int) -> list[dict[s
                 wc.licensee_code AS master_licensee_code,
                 wc.fluid         AS master_fluid,
                 wc.well_name     AS master_well_name,
-                wc.licence_no    AS master_licence_no
+                wc.licence_no    AS master_licence_no,
+                wcg.centroid_lat,
+                wcg.centroid_lon
             FROM matches m
             LEFT JOIN wells_current wc ON wc.uwi = m.uwi
+            LEFT JOIN (
+                SELECT uwi, MAX(centroid_lat) AS centroid_lat, MAX(centroid_lon) AS centroid_lon
+                FROM wells GROUP BY uwi
+            ) wcg ON wcg.uwi = m.uwi
+        ),
+        with_nearest AS (
+            SELECT
+                w.*,
+                tf.facility_id   AS nearest_facility_id,
+                tf.facility_name AS nearest_facility_name,
+                ROUND(tf.distance_km, 1) AS distance_km
+            FROM with_master w
+            LEFT JOIN LATERAL (
+                SELECT
+                    f.facility_id,
+                    f.facility_name,
+                    2.0 * 6371.0 * ASIN(SQRT(
+                        POW(SIN(RADIANS(f.lat - w.centroid_lat) / 2.0), 2)
+                        + COS(RADIANS(w.centroid_lat)) * COS(RADIANS(f.lat))
+                          * POW(SIN(RADIANS(f.lon - w.centroid_lon) / 2.0), 2)
+                    )) AS distance_km
+                FROM temi_facilities f
+                WHERE w.centroid_lat IS NOT NULL AND w.centroid_lon IS NOT NULL
+                ORDER BY distance_km ASC
+                LIMIT 1
+            ) tf ON TRUE
         ),
         with_op AS (
             SELECT
@@ -113,7 +155,7 @@ def fetch_transitions(conn: duckdb.DuckDBPyConnection, days: int) -> list[dict[s
                     op5.canonical_name
                 ) AS resolved_operator_name,
                 COALESCE(op4.operator_id, op5.operator_id) AS resolved_operator_id
-            FROM with_master w
+            FROM with_nearest w
             LEFT JOIN operators op4
               ON op4.operator_id = (
                   SELECT operator_id FROM operator_identifiers oi
@@ -141,10 +183,14 @@ def fetch_transitions(conn: duckdb.DuckDBPyConnection, days: int) -> list[dict[s
             master_fluid,
             province,
             field_name,
+            nearest_facility_id,
+            nearest_facility_name,
+            distance_km,
             (SELECT anchor_date FROM bounds) AS anchor_date
         FROM with_op
+        WHERE distance_km IS NOT NULL AND distance_km < ($max_km)
         ORDER BY resolved_operator_name NULLS LAST, event_date DESC, uwi
-        """.replace("($days)", str(days))
+        """.replace("($days)", str(days)).replace("($max_km)", str(max_km))
     ).df()
     return [
         {key: (None if value is None or (hasattr(value, "isoformat") is False and str(value) == "NaT") else value)
@@ -180,6 +226,8 @@ def group_by_operator(transitions: list[dict[str, Any]]) -> list[dict[str, Any]]
             "new_status": tx.get("new_status"),
             "pattern_label": pattern_label,
             "well_name": tx.get("master_well_name"),
+            "nearest_facility_name": tx.get("nearest_facility_name"),
+            "distance_km": tx.get("distance_km"),
         }
         op["wells"].append(well)
     # Sort: operators with most wells first; within operator, newest event first
@@ -228,7 +276,7 @@ def main() -> int:
 
     conn = duckdb.connect(str(db_path), read_only=True)
     try:
-        transitions = fetch_transitions(conn, args.days)
+        transitions = fetch_transitions(conn, args.days, args.max_km)
     finally:
         conn.close()
 
@@ -250,6 +298,7 @@ def main() -> int:
         "anchor_date": anchor_date,
         "window_start": (anchor_date - timedelta(days=args.days)) if anchor_date else None,
         "days": args.days,
+        "max_km": args.max_km,
         "pattern_counts": dict(pattern_counts),
     }
     html = render_html(template_path, context)
