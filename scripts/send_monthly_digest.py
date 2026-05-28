@@ -16,7 +16,6 @@ import duckdb
 import pandas as pd
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 
-
 DEFAULT_PREVIEW_PATH = Path("/tmp/monthly_digest_preview.html")
 MAX_SAMPLES_PER_OPERATOR = 3
 SIGNAL_LABELS = {

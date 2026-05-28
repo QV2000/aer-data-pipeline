@@ -20,7 +20,6 @@ import duckdb
 import pandas as pd
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 
-
 CATEGORY_ORDER = ("new_operator", "near_facility")
 DEFAULT_PREVIEW_PATH = Path("/tmp/digest_preview.html")
 

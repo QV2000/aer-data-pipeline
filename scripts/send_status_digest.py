@@ -33,7 +33,6 @@ from typing import Any
 import duckdb
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 
-
 PATTERN_LABELS = {
     ("DRL&C", "CR-OIL PUMP"): "New crude oil well — pumping",
     ("DRL&C", "CR-BIT PUMP"): "New bitumen well — pumping",
