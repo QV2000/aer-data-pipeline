@@ -34,10 +34,12 @@ import duckdb
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 
 PATTERN_LABELS = {
-    ("DRL&C", "CR-OIL PUMP"): "New crude oil well — pumping",
-    ("DRL&C", "CR-BIT PUMP"): "New bitumen well — pumping",
-    ("DRL&C", "CR-OIL FLOW"): "New crude oil well — flowing",
-    ("CR-OIL SUSP", "CR-OIL PUMP"): "Reactivated crude oil well — pumping",
+    # "Pumping" is the default mode for these patterns, so we leave it implicit.
+    # Only the flowing exception is called out explicitly.
+    ("DRL&C", "CR-OIL PUMP"): "New crude oil",
+    ("DRL&C", "CR-BIT PUMP"): "New bitumen",
+    ("DRL&C", "CR-OIL FLOW"): "New crude oil — flowing",
+    ("CR-OIL SUSP", "CR-OIL PUMP"): "Reactivated crude oil",
 }
 
 
@@ -303,12 +305,24 @@ def group_by_operator(transitions: list[dict[str, Any]]) -> list[dict[str, Any]]
             "distance_km": tx.get("distance_km"),
         }
         op["wells"].append(well)
-    # Sort: operators with most wells first; within operator, newest event first
+    # Sort: operators with most wells first; within operator, newest event first.
+    # Also group wells by pattern_label so the template can render each
+    # category once with its wells underneath (less repetitive than per-row labels).
     ops = []
     for op in grouped.values():
         op["provinces"] = ", ".join(sorted(op["provinces"])) if op["provinces"] else None
         op["well_count"] = len(op["wells"])
         op["wells"].sort(key=lambda w: (w["event_date"] is None, w["event_date"] or ""), reverse=True)
+
+        groups_by_label: dict[str, list[dict[str, Any]]] = {}
+        for w in op["wells"]:
+            groups_by_label.setdefault(w["pattern_label"], []).append(w)
+        op["well_groups"] = [
+            {"label": label, "count": len(wells), "wells": wells}
+            for label, wells in groups_by_label.items()
+        ]
+        # Group order: most wells first, then label alpha
+        op["well_groups"].sort(key=lambda g: (-g["count"], g["label"]))
         ops.append(op)
     ops.sort(key=lambda o: (-o["well_count"], o["operator_name"]))
     return ops
