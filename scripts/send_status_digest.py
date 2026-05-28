@@ -400,7 +400,7 @@ def main() -> int:
         else:
             window_label = anchor_date.strftime("%b %d") if anchor_date else "latest"
             subject = (
-                f"TrendEnergy crude radar — {context['total_wells']} wells, "
+                f"Well Status Changes — {context['total_wells']} wells, "
                 f"week of {window_label}"
             )
         try:
