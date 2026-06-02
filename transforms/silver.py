@@ -1443,15 +1443,119 @@ def _load_st2_status_changes(
     return df
 
 
+def _build_sk_status_changes_from_bulletin(
+    data_dir: Path,
+    registry: SourceRegistry,
+) -> pd.DataFrame:
+    """Synthesize SK status_change rows from sk_well_bulletin (delta feed).
+
+    SK has no equivalent of AB's ST2 old→new transition log. The richest SK
+    source carrying status info is the daily Well Bulletin, which publishes
+    rows with bulletin_type ∈ {'New','Amend'} — i.e. licence issued or
+    amended events, snapshots of current licence_status.
+
+    For the status digest we treat bulletin_type='New' rows for crude/bitumen
+    well_completion_types as synthetic transitions:
+
+        old_status='SK-NEW LIC', new_status ∈ {'SK-OIL LIC','SK-BIT LIC'}
+
+    The labels are intentionally SK-prefixed so they stay distinct from the
+    AB DRL&C→CR-OIL PUMP signals downstream (those mean "well is pumping";
+    these mean "licence was issued"). Gas/strat/other completions are dropped.
+    """
+    try:
+        config = registry.get('sk_well_bulletin')
+    except KeyError:
+        return pd.DataFrame()
+
+    bronze_path = data_dir / "bronze" / config.id
+    files = sorted(bronze_path.glob("*.parquet")) if bronze_path.exists() else []
+    if not files:
+        return pd.DataFrame()
+
+    parts = []
+    for f in files:
+        try:
+            parts.append(pd.read_parquet(f))
+        except Exception as e:
+            logger.warning(f"Failed to read SK well bulletin {f}: {e}")
+    if not parts:
+        return pd.DataFrame()
+
+    bull = pd.concat(parts, ignore_index=True)
+    if 'bulletin_type' not in bull.columns:
+        logger.warning("sk_well_bulletin missing bulletin_type column; skipping SK status synthesis")
+        return pd.DataFrame()
+
+    new_mask = bull['bulletin_type'].astype(str).str.strip().str.lower() == 'new'
+    new_rows = bull[new_mask].copy()
+    if new_rows.empty:
+        return pd.DataFrame()
+
+    completion = new_rows.get('well_completion_type', pd.Series([''] * len(new_rows))).fillna('').astype(str).str.lower()
+
+    is_bitumen = completion.str.contains('bitumen', na=False) | completion.str.contains('sagd', na=False)
+    is_oil = completion.str.contains('oil', na=False) & ~is_bitumen
+    keep = is_oil | is_bitumen
+    new_rows = new_rows[keep].copy()
+    if new_rows.empty:
+        return pd.DataFrame()
+
+    new_status = pd.Series('SK-OIL LIC', index=new_rows.index)
+    new_status[is_bitumen[keep]] = 'SK-BIT LIC'
+
+    def _sk_bulletin_uwi(raw):
+        if raw is None or (isinstance(raw, float) and pd.isna(raw)):
+            return None
+        s = str(raw).strip()
+        if not s:
+            return None
+        stripped = s.replace(' ', '')
+        if stripped.upper().startswith('SKWI'):
+            return format_petrinex_uwi(stripped)
+        return s
+
+    uwi_series = new_rows.get('uwi', pd.Series([None] * len(new_rows))).apply(_sk_bulletin_uwi)
+    event_date = pd.to_datetime(new_rows.get('issued_date'), errors='coerce')
+    if event_date.isna().all() and 'status_date' in new_rows.columns:
+        event_date = pd.to_datetime(new_rows['status_date'], errors='coerce')
+
+    out = pd.DataFrame({
+        'uwi': uwi_series.values,
+        'event_date': event_date.values,
+        'old_status': 'SK-NEW LIC',
+        'new_status': new_status.values,
+        'old_status_code': None,
+        'new_status_code': new_rows.get('well_completion_code'),
+        'licence': new_rows.get('licence_number'),
+        'licensee_code': new_rows.get('licensee_baid'),
+        'licensee_name': new_rows.get('licensee_name'),
+        'name': None,
+        'field_code': None,
+        'field_name': new_rows.get('field_office'),
+        'province': 'SK',
+        'event_type': 'status_change',
+    })
+
+    out = out.dropna(subset=['uwi', 'event_date'])
+    out = out.drop_duplicates(subset=['uwi', 'event_date', 'new_status'], keep='first')
+
+    logger.info(f"Synthesized {len(out)} SK status_change rows from {len(files)} bulletin snapshots")
+    return out
+
+
 def build_status_changes_table(
     data_dir: Path,
     registry: Optional[SourceRegistry] = None
 ) -> pd.DataFrame:
     """
-    Build the silver status_changes table from ST2 weekly status changes.
+    Build the silver status_changes table from ST2 weekly status changes (AB)
+    plus synthesized SK rows from sk_well_bulletin (new oil/bitumen licences).
 
     This is the PRIMARY source for "What Changed" status change detection.
-    Contains actual dated status transitions (old_status -> new_status).
+    Contains actual dated status transitions (old_status -> new_status) for AB,
+    and licence-issued events surfaced as SK-NEW LIC → SK-OIL LIC / SK-BIT LIC
+    for SK.
     """
     if registry is None:
         registry = SourceRegistry()
@@ -1460,7 +1564,10 @@ def build_status_changes_table(
 
     if df.empty:
         logger.warning("No ST2 status change data found in bronze layer")
-        return pd.DataFrame()
+        sk_only = _build_sk_status_changes_from_bulletin(data_dir, registry)
+        if not sk_only.empty:
+            sk_only['_silver_version'] = pd.Timestamp.now().isoformat()
+        return sk_only
 
     # Handle raw Tableau column names (00.UnFormatted UWI, etc.) if parser didn't clean them
     raw_column_mapping = {
@@ -1515,6 +1622,19 @@ def build_status_changes_table(
     df = _trim_join_keys(df, ['uwi', 'licence', 'licensee', 'licensee_code', 'field_code'])
 
     df = df.drop(columns=['_snapshot_date', '_source_id'], errors='ignore')
+
+    sk_df = _build_sk_status_changes_from_bulletin(data_dir, registry)
+    if not sk_df.empty:
+        sk_df = _trim_join_keys(sk_df, ['uwi', 'licence', 'licensee_code'])
+        df = pd.concat([df, sk_df], ignore_index=True, sort=False)
+        logger.info(f"Appended {len(sk_df)} SK status_change rows; total now {len(df)}")
+
+    # Ensure licensee_name column always exists so downstream queries
+    # (digest SQL) can reference it without conditional checks. AB ST2
+    # rows have no licensee_name; SK bulletin rows populate it.
+    if 'licensee_name' not in df.columns:
+        df['licensee_name'] = None
+
     df['_silver_version'] = pd.Timestamp.now().isoformat()
 
     logger.info(f"Built status_changes silver table: {len(df)} rows")

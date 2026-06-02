@@ -1,16 +1,25 @@
 #!/usr/bin/env python3
 """Render a status-change-only digest for the TrendEnergy New Crude report.
 
-Surfaces every well whose status transitioned through one of the four
+Surfaces every well whose status transitioned through one of the
 sales-relevant patterns in the window, regardless of whether the well also
 has production data (the main opportunity report's signal dedupe collapses
 these into higher-priority signals like FIRST_CONFIRMED_OIL).
 
-Patterns:
+Patterns (AB, from ST2 transition log):
   DRL&C       -> CR-OIL PUMP   (new crude producer, pumping)
   DRL&C       -> CR-BIT PUMP   (new bitumen producer, pumping)
   DRL&C       -> CR-OIL FLOW   (new crude producer, flowing)
   CR-OIL SUSP -> CR-OIL PUMP   (reactivation from suspension)
+
+Patterns (SK, synthesized from sk_well_bulletin 'New' rows):
+  SK-NEW LIC  -> SK-OIL LIC    (new crude oil licence issued)
+  SK-NEW LIC  -> SK-BIT LIC    (new bitumen / heavy-oil licence issued)
+
+The SK signal fires earlier in the lifecycle than the AB one (licensed,
+not yet pumping) because SK has no direct equivalent of ST2's transition
+log; this is intentional and the labels are kept separate so reps can
+read the semantic difference.
 
 Output is HTML; one card per operator with all their transition wells listed.
 """
@@ -34,12 +43,16 @@ import duckdb
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 
 PATTERN_LABELS = {
-    # "Pumping" is the default mode for these patterns, so we leave it implicit.
-    # Only the flowing exception is called out explicitly.
+    # AB ST2 transitions — "Pumping" is the default mode for these patterns,
+    # so we leave it implicit. Only the flowing exception is called out.
     ("DRL&C", "CR-OIL PUMP"): "New crude oil",
     ("DRL&C", "CR-BIT PUMP"): "New bitumen",
     ("DRL&C", "CR-OIL FLOW"): "New crude oil — flowing",
     ("CR-OIL SUSP", "CR-OIL PUMP"): "Reactivated crude oil",
+    # SK well-bulletin synthesized rows — licence-issued events. Kept as
+    # separate labels because the SK signal is "licensed", not "pumping".
+    ("SK-NEW LIC", "SK-OIL LIC"): "New SK crude licence",
+    ("SK-NEW LIC", "SK-BIT LIC"): "New SK bitumen licence",
 }
 
 
@@ -171,7 +184,10 @@ def fetch_transitions(conn: duckdb.DuckDBPyConnection, days: int, max_km: float)
                 sc.licensee_code,
                 sc.licence,
                 sc.field_name,
-                sc.province
+                sc.province,
+                -- Populated for SK synthesized rows (sk_well_bulletin
+                -- licensee_name); NULL for AB ST2 rows.
+                sc.licensee_name AS sc_licensee_name
             FROM status_changes sc
             CROSS JOIN bounds b
             WHERE CAST(sc.event_date AS DATE) >= b.anchor_date - INTERVAL ($days) DAY
@@ -179,6 +195,7 @@ def fetch_transitions(conn: duckdb.DuckDBPyConnection, days: int, max_km: float)
               AND (
                   (UPPER(TRIM(sc.old_status)) = 'DRL&C' AND UPPER(TRIM(sc.new_status)) IN ('CR-OIL PUMP','CR-BIT PUMP','CR-OIL FLOW'))
                   OR (UPPER(TRIM(sc.old_status)) = 'CR-OIL SUSP' AND UPPER(TRIM(sc.new_status)) = 'CR-OIL PUMP')
+                  OR (UPPER(TRIM(sc.old_status)) = 'SK-NEW LIC' AND UPPER(TRIM(sc.new_status)) IN ('SK-OIL LIC','SK-BIT LIC'))
               )
         ),
         with_master AS (
@@ -227,9 +244,11 @@ def fetch_transitions(conn: duckdb.DuckDBPyConnection, days: int, max_km: float)
                 COALESCE(
                     w.master_licensee,
                     op4.canonical_name,
-                    op5.canonical_name
+                    op5.canonical_name,
+                    op_sk.canonical_name,
+                    w.sc_licensee_name
                 ) AS resolved_operator_name,
-                COALESCE(op4.operator_id, op5.operator_id) AS resolved_operator_id
+                COALESCE(op4.operator_id, op5.operator_id, op_sk.operator_id) AS resolved_operator_id
             FROM with_nearest w
             LEFT JOIN operators op4
               ON op4.operator_id = (
@@ -243,6 +262,13 @@ def fetch_transitions(conn: duckdb.DuckDBPyConnection, days: int, max_km: float)
                   SELECT operator_id FROM operator_identifiers oi
                   WHERE oi.identifier_kind = 'ab_ba_code_5'
                     AND oi.identifier_value = UPPER(TRIM(COALESCE(w.master_licensee_code, w.licensee_code)))
+                  LIMIT 1
+              )
+            LEFT JOIN operators op_sk
+              ON op_sk.operator_id = (
+                  SELECT operator_id FROM operator_identifiers oi
+                  WHERE oi.identifier_kind = 'sk_legal_name'
+                    AND oi.identifier_value = UPPER(TRIM(w.sc_licensee_name))
                   LIMIT 1
               )
         )
