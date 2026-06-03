@@ -175,7 +175,7 @@ def fetch_transitions(conn: duckdb.DuckDBPyConnection, days: int, max_km: float)
                 ('ABTM0157119', 'Persist Wayne',                  51.403331, -112.914700),
                 ('SKTMTT15003', 'Dulwich',                        53.165195, -109.703831)
         ),
-        matches AS (
+        pattern_filter AS (
             SELECT
                 sc.uwi,
                 CAST(sc.event_date AS DATE) AS event_date,
@@ -193,14 +193,34 @@ def fetch_transitions(conn: duckdb.DuckDBPyConnection, days: int, max_km: float)
                 sc.centroid_lat AS sc_centroid_lat,
                 sc.centroid_lon AS sc_centroid_lon
             FROM status_changes sc
-            CROSS JOIN bounds b
-            WHERE CAST(sc.event_date AS DATE) >= b.anchor_date - INTERVAL ($days) DAY
-              AND CAST(sc.event_date AS DATE) <= b.anchor_date
-              AND (
+            WHERE (
                   (UPPER(TRIM(sc.old_status)) = 'DRL&C' AND UPPER(TRIM(sc.new_status)) IN ('CR-OIL PUMP','CR-BIT PUMP','CR-OIL FLOW'))
                   OR (UPPER(TRIM(sc.old_status)) = 'CR-OIL SUSP' AND UPPER(TRIM(sc.new_status)) = 'CR-OIL PUMP')
                   OR (UPPER(TRIM(sc.old_status)) = 'SK-NEW LIC' AND UPPER(TRIM(sc.new_status)) IN ('SK-OIL LIC','SK-BIT LIC'))
               )
+        ),
+        first_seen AS (
+            -- For each (well, transition) combination, find the earliest
+            -- date it was ever reported in status_changes. ST2 publishes
+            -- the same transition in every weekly snapshot until the well
+            -- changes status again — so the "true" event was the first
+            -- time we saw it. Anything whose first_seen falls BEFORE the
+            -- current digest window has been reported in a prior week
+            -- and should not repeat in this one.
+            SELECT
+                uwi, old_status, new_status,
+                MIN(event_date) AS first_seen_date
+            FROM pattern_filter
+            GROUP BY 1, 2, 3
+        ),
+        matches AS (
+            SELECT pf.*
+            FROM pattern_filter pf
+            JOIN first_seen fs USING (uwi, old_status, new_status)
+            CROSS JOIN bounds b
+            WHERE pf.event_date = fs.first_seen_date
+              AND fs.first_seen_date >= b.anchor_date - INTERVAL ($days) DAY
+              AND fs.first_seen_date <= b.anchor_date
         ),
         with_master AS (
             SELECT
