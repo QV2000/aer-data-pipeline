@@ -1520,6 +1520,34 @@ def _build_sk_status_changes_from_bulletin(
     if event_date.isna().all() and 'status_date' in new_rows.columns:
         event_date = pd.to_datetime(new_rows['status_date'], errors='coerce')
 
+    # Resolve centroids inline. SK bulletin wells often aren't in the silver
+    # wells table yet (different ingest cadence), so the digest's distance
+    # filter would drop them. We pre-compute centroids here so status_changes
+    # carries them directly. W1 meridian is intentionally unsupported — far
+    # eastern SK, outside the TEMI Dulwich service area.
+    try:
+        import sys
+        from pathlib import Path as _P
+        _webapp = _P(__file__).resolve().parent.parent.parent / "webapp" / "backend"
+        if str(_webapp) not in sys.path:
+            sys.path.insert(0, str(_webapp))
+        from domain.spatial import uwi_to_centroid as _uwi_to_centroid
+    except Exception:
+        _uwi_to_centroid = None
+
+    def _centroid(u):
+        if not u or _uwi_to_centroid is None:
+            return (None, None)
+        try:
+            r = _uwi_to_centroid(str(u))
+            return r if r else (None, None)
+        except Exception:
+            return (None, None)
+
+    centroids = uwi_series.apply(_centroid)
+    centroid_lat = centroids.map(lambda t: t[0])
+    centroid_lon = centroids.map(lambda t: t[1])
+
     out = pd.DataFrame({
         'uwi': uwi_series.values,
         'event_date': event_date.values,
@@ -1535,12 +1563,18 @@ def _build_sk_status_changes_from_bulletin(
         'field_name': new_rows.get('field_office'),
         'province': 'SK',
         'event_type': 'status_change',
+        'centroid_lat': centroid_lat.values,
+        'centroid_lon': centroid_lon.values,
     })
 
     out = out.dropna(subset=['uwi', 'event_date'])
     out = out.drop_duplicates(subset=['uwi', 'event_date', 'new_status'], keep='first')
 
-    logger.info(f"Synthesized {len(out)} SK status_change rows from {len(files)} bulletin snapshots")
+    resolved = int(out['centroid_lat'].notna().sum()) if 'centroid_lat' in out.columns else 0
+    logger.info(
+        f"Synthesized {len(out)} SK status_change rows from {len(files)} bulletin snapshots "
+        f"({resolved} with centroids; remainder are W1 or unparseable)"
+    )
     return out
 
 
@@ -1629,11 +1663,13 @@ def build_status_changes_table(
         df = pd.concat([df, sk_df], ignore_index=True, sort=False)
         logger.info(f"Appended {len(sk_df)} SK status_change rows; total now {len(df)}")
 
-    # Ensure licensee_name column always exists so downstream queries
-    # (digest SQL) can reference it without conditional checks. AB ST2
-    # rows have no licensee_name; SK bulletin rows populate it.
-    if 'licensee_name' not in df.columns:
-        df['licensee_name'] = None
+    # Ensure licensee_name + centroid columns always exist so downstream
+    # queries (digest SQL) can reference them without conditional checks.
+    # AB ST2 rows have no licensee_name / no inline centroid; SK bulletin
+    # rows populate both.
+    for col in ('licensee_name', 'centroid_lat', 'centroid_lon'):
+        if col not in df.columns:
+            df[col] = None
 
     df['_silver_version'] = pd.Timestamp.now().isoformat()
 

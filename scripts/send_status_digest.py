@@ -187,7 +187,11 @@ def fetch_transitions(conn: duckdb.DuckDBPyConnection, days: int, max_km: float)
                 sc.province,
                 -- Populated for SK synthesized rows (sk_well_bulletin
                 -- licensee_name); NULL for AB ST2 rows.
-                sc.licensee_name AS sc_licensee_name
+                sc.licensee_name AS sc_licensee_name,
+                -- Pre-computed centroids for SK rows whose UWIs aren't
+                -- yet in the wells silver table. NULL for AB.
+                sc.centroid_lat AS sc_centroid_lat,
+                sc.centroid_lon AS sc_centroid_lon
             FROM status_changes sc
             CROSS JOIN bounds b
             WHERE CAST(sc.event_date AS DATE) >= b.anchor_date - INTERVAL ($days) DAY
@@ -206,8 +210,8 @@ def fetch_transitions(conn: duckdb.DuckDBPyConnection, days: int, max_km: float)
                 wc.fluid         AS master_fluid,
                 wc.well_name     AS master_well_name,
                 wc.licence_no    AS master_licence_no,
-                wcg.centroid_lat,
-                wcg.centroid_lon
+                COALESCE(wcg.centroid_lat, m.sc_centroid_lat) AS centroid_lat,
+                COALESCE(wcg.centroid_lon, m.sc_centroid_lon) AS centroid_lon
             FROM matches m
             LEFT JOIN wells_current wc ON wc.uwi = m.uwi
             LEFT JOIN (
