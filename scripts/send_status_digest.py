@@ -72,8 +72,28 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--days",
         type=int,
-        default=28,
-        help="Window size in days (anchored to MAX(event_date) in status_changes). Default 28.",
+        default=None,
+        help=(
+            "Window size in days (anchored to MAX(event_date)). If omitted, "
+            "the script consults --state-file: starts at (last_sent + 1 day) "
+            "if the state file exists, otherwise falls back to 28 days. "
+            "Passing --days explicitly always overrides the state file."
+        ),
+    )
+    parser.add_argument(
+        "--state-file",
+        default="/data/.digest_last_sent",
+        help=(
+            "Path to a file storing the anchor_date of the last successful "
+            "--send (ISO YYYY-MM-DD). When this file exists and --days is "
+            "not given, the next run starts at last_sent + 1 day, so "
+            "consecutive digests never share wells. Default: /data/.digest_last_sent"
+        ),
+    )
+    parser.add_argument(
+        "--ignore-state",
+        action="store_true",
+        help="Ignore the state file even if it exists; use --days (or 28).",
     )
     parser.add_argument(
         "--max-km",
@@ -161,11 +181,19 @@ def lsd_label_from_uwi(uwi: str | None) -> str:
     return match.group(1) if match else uwi
 
 
-def fetch_transitions(conn: duckdb.DuckDBPyConnection, days: int, max_km: float) -> list[dict[str, Any]]:
+def fetch_transitions(
+    conn: duckdb.DuckDBPyConnection,
+    *,
+    window_start: date,
+    anchor_date: date,
+    max_km: float,
+) -> list[dict[str, Any]]:
     rows = conn.execute(
         """
         WITH bounds AS (
-            SELECT MAX(CAST(event_date AS DATE)) AS anchor_date FROM status_changes
+            SELECT
+                DATE '$ANCHOR_DATE' AS anchor_date,
+                DATE '$WINDOW_START' AS window_start
         ),
         temi_facilities(facility_id, facility_name, lat, lon) AS (
             VALUES
@@ -219,7 +247,7 @@ def fetch_transitions(conn: duckdb.DuckDBPyConnection, days: int, max_km: float)
             JOIN first_seen fs USING (uwi, old_status, new_status)
             CROSS JOIN bounds b
             WHERE pf.event_date = fs.first_seen_date
-              AND fs.first_seen_date >= b.anchor_date - INTERVAL ($days) DAY
+              AND fs.first_seen_date >= b.window_start
               AND fs.first_seen_date <= b.anchor_date
         ),
         with_master AS (
@@ -315,7 +343,9 @@ def fetch_transitions(conn: duckdb.DuckDBPyConnection, days: int, max_km: float)
         FROM with_op
         WHERE distance_km IS NOT NULL AND distance_km < ($max_km)
         ORDER BY resolved_operator_name NULLS LAST, event_date DESC, uwi
-        """.replace("($days)", str(days)).replace("($max_km)", str(max_km))
+        """.replace("$ANCHOR_DATE", anchor_date.isoformat())
+           .replace("$WINDOW_START", window_start.isoformat())
+           .replace("($max_km)", str(max_km))
     ).df()
     return [
         {key: (None if value is None or (hasattr(value, "isoformat") is False and str(value) == "NaT") else value)
@@ -398,11 +428,47 @@ def render_html(template_path: Path, context: dict[str, Any]) -> str:
     return template.render(**context)
 
 
+DEFAULT_DAYS_FALLBACK = 28
+
+
+def resolve_window(
+    *,
+    anchor_date: date,
+    days_arg: int | None,
+    state_path: Path,
+    ignore_state: bool,
+) -> tuple[date, str]:
+    """Decide the window start date and a human-readable label for it.
+
+    Precedence:
+      1. --days N explicit → window starts at (anchor - N days). State ignored.
+      2. State file present (and not --ignore-state) → starts at (last_sent + 1).
+      3. Fallback → (anchor - 28 days).
+
+    Returns (window_start_date, mode_label_for_logs).
+    """
+    if days_arg is not None:
+        return anchor_date - timedelta(days=days_arg), f"--days {days_arg}"
+
+    if not ignore_state and state_path.exists():
+        try:
+            last_sent = date.fromisoformat(state_path.read_text().strip())
+            return last_sent + timedelta(days=1), f"since last send ({last_sent.isoformat()})"
+        except Exception as e:
+            print(
+                f"WARN: could not parse state file {state_path}: {e}; falling back to default window",
+                file=sys.stderr,
+            )
+
+    return anchor_date - timedelta(days=DEFAULT_DAYS_FALLBACK), f"default {DEFAULT_DAYS_FALLBACK} days"
+
+
 def main() -> int:
     args = parse_args()
     db_path = Path(args.db)
     template_path = Path(args.template)
     preview_path = Path(args.preview_out)
+    state_path = Path(args.state_file)
 
     if not db_path.exists():
         print(f"DuckDB not found: {db_path}", file=sys.stderr)
@@ -413,14 +479,40 @@ def main() -> int:
 
     conn = duckdb.connect(str(db_path), read_only=True)
     try:
-        transitions = fetch_transitions(conn, args.days, args.max_km)
+        anchor_row = conn.execute(
+            "SELECT MAX(CAST(event_date AS DATE)) FROM status_changes"
+        ).fetchone()
+        anchor_date = anchor_row[0] if anchor_row else None
+        if isinstance(anchor_date, datetime):
+            anchor_date = anchor_date.date()
+        if anchor_date is None:
+            print("status_changes is empty; nothing to do.", file=sys.stderr)
+            return 0
+
+        window_start, window_mode = resolve_window(
+            anchor_date=anchor_date,
+            days_arg=args.days,
+            state_path=state_path,
+            ignore_state=args.ignore_state,
+        )
+
+        if window_start > anchor_date:
+            print(
+                f"No new data since last send (state={state_path.read_text().strip() if state_path.exists() else 'n/a'}, "
+                f"anchor={anchor_date.isoformat()}); nothing to do."
+            )
+            return 0
+
+        transitions = fetch_transitions(
+            conn,
+            window_start=window_start,
+            anchor_date=anchor_date,
+            max_km=args.max_km,
+        )
     finally:
         conn.close()
 
     operators = group_by_operator(transitions)
-    anchor_date = transitions[0]["anchor_date"] if transitions else None
-    if isinstance(anchor_date, datetime):
-        anchor_date = anchor_date.date()
 
     pattern_counts: dict[str, int] = defaultdict(int)
     for tx in transitions:
@@ -428,13 +520,15 @@ def main() -> int:
         label = PATTERN_LABELS.get(pattern_key, f"{pattern_key[0]} → {pattern_key[1]}")
         pattern_counts[label] += 1
 
+    window_days = (anchor_date - window_start).days
+
     context = {
         "operators": operators,
         "total_wells": sum(op["well_count"] for op in operators),
         "operator_count": len(operators),
         "anchor_date": anchor_date,
-        "window_start": (anchor_date - timedelta(days=args.days)) if anchor_date else None,
-        "days": args.days,
+        "window_start": window_start,
+        "days": window_days,
         "max_km": args.max_km,
         "pattern_counts": dict(pattern_counts),
     }
@@ -442,7 +536,7 @@ def main() -> int:
     preview_path.parent.mkdir(parents=True, exist_ok=True)
     preview_path.write_text(html, encoding="utf-8")
     print(f"Wrote status digest: {preview_path}")
-    print(f"Window: {context['window_start']} → {anchor_date} ({args.days} days)")
+    print(f"Window: {window_start} → {anchor_date} ({window_days} days, mode: {window_mode})")
     print(f"- {context['operator_count']} operators, {context['total_wells']} wells")
     for label, n in pattern_counts.items():
         print(f"  - {label}: {n}")
@@ -472,6 +566,15 @@ def main() -> int:
         except Exception as e:
             print(f"ERROR: SMTP send failed: {e}", file=sys.stderr)
             return 4
+
+        # Only update the state file after a successful send so a failed
+        # send never causes wells to be silently dropped from the next run.
+        try:
+            state_path.parent.mkdir(parents=True, exist_ok=True)
+            state_path.write_text(anchor_date.isoformat() + "\n", encoding="utf-8")
+            print(f"Updated state file: {state_path} = {anchor_date.isoformat()}")
+        except Exception as e:
+            print(f"WARN: could not write state file {state_path}: {e}", file=sys.stderr)
 
     return 0
 
