@@ -1,0 +1,6 @@
+facility_id,name,operator_company,facility_type,lat,lon,province,notes
+ABTM0000930,Cynthia Pembina Terminal,Bench Creek Resources Ltd.,Tank Farm/Oil Loading and Unloading Terminal,53.310727,-115.619797,AB,Petrinex sub_type 671 / Edmonton hub region
+ABTM0112311,Rush Energy Services Inc.,Rush Energy Services Inc.,Third Party Tank Farm/Oil Loading and Unloading Terminal,53.099561,-114.474046,AB,Petrinex sub_type 673
+ABTM0125201,Vermilion 15-16-051-11w5 Tm,Vermilion Energy Inc.,Tank Farm,53.408441,-115.558574,AB,At DLS 15-16-051-11W5 (was originally listed in spec as DLS-anchored facility)
+ABTM0157119,Persist Wayne Oil Terminal,Persist Oil And Gas Inc.,Third Party Tank Farm/Oil Loading and Unloading Terminal,51.403331,-112.914700,AB,Petrinex sub_type 673
+SKTMTT15003,Dulwich Terminal (COP D11A),Marlin Resources Ltd.,Tank Farm/Oil Loading and Unloading Terminal,53.165195,-109.703831,SK,User-provided coords; warehouse had ~6km offset

@@ -1,7 +1,9 @@
 
+import pandas as pd
+
 from downloader.manifest import ManifestManager
 from parsers.txt_parser import normalize_column_name
-from transforms.silver import format_petrinex_uwi
+from transforms.silver import _populate_uwi_from_petrinex_well_id, format_petrinex_uwi
 
 
 def test_normalize_column_name():
@@ -23,11 +25,26 @@ def test_format_petrinex_uwi_ab():
 
 def test_format_petrinex_uwi_sk():
     assert format_petrinex_uwi("SKWI100010100308W202") == "00/01-01-003-08W2/2"
+    assert format_petrinex_uwi("SKWI101010100112W200") == "01/01-01-001-12W2/0"
 
 
 def test_format_petrinex_uwi_passthrough():
     assert format_petrinex_uwi("short") == "short"
     assert format_petrinex_uwi("00/01-01-003-08W4/2") == "00/01-01-003-08W4/2"
+
+
+def test_populate_uwi_from_petrinex_well_id():
+    df = pd.DataFrame(
+        {
+            "uwi": [None, "00/01-01-003-08W4/2"],
+            "well_id": ["SKWI101010100112W200", "ABWI100010100308W402"],
+        }
+    )
+
+    result = _populate_uwi_from_petrinex_well_id(df)
+
+    assert result.loc[0, "uwi"] == "01/01-01-001-12W2/0"
+    assert result.loc[1, "uwi"] == "00/01-01-003-08W4/2"
 
 
 def test_manifest_round_trip(tmp_path):
@@ -102,6 +119,24 @@ def test_dataset_config_link_regex():
     reg = load_registry()
     config = reg.get('st37_wells_txt')
     assert config.link_regex is not None
+
+
+def test_filter_archive_targets_skips_archive_list():
+    from cli import filter_archive_targets
+    from registry.loader import load_registry
+
+    reg = load_registry()
+    targets = [
+        "st37_wells_txt",
+        "st1_well_licences_archive",
+        "st49_spud_archive",
+        "petrinex_production",
+    ]
+
+    kept, skipped = filter_archive_targets(targets, reg)
+
+    assert kept == ["st37_wells_txt", "petrinex_production"]
+    assert skipped == ["st1_well_licences_archive", "st49_spud_archive"]
 
 
 def test_validation_required_columns():

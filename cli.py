@@ -16,10 +16,13 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
+import click
 import requests
 from dateutil.relativedelta import relativedelta
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
+
+from downloader.html_index import DEFAULT_HTTP_HEADERS
 
 
 def _get_session():
@@ -29,8 +32,6 @@ def _get_session():
         max_retries=Retry(total=3, backoff_factor=1, status_forcelist=[429, 500, 502, 503])
     ))
     return s
-
-import click
 
 # Add project to path
 sys.path.insert(0, str(Path(__file__).parent))
@@ -88,7 +89,19 @@ def cli():
     show_default=True,
     help="For petrinex_production only: number of months to ingest (going backwards from last month). Use 60 for ~5 years backfill.",
 )
-def ingest(ingest_all: bool, dataset: str, cadence: str, force: bool, petrinex_months: int):
+@click.option(
+    '--include-archives',
+    is_flag=True,
+    help='Include historical archive_list datasets in bulk ingest modes.',
+)
+def ingest(
+    ingest_all: bool,
+    dataset: str,
+    cadence: str,
+    force: bool,
+    petrinex_months: int,
+    include_archives: bool,
+):
     """Download and process datasets."""
     data_dir = get_data_dir()
     registry = load_registry()
@@ -110,6 +123,15 @@ def ingest(ingest_all: bool, dataset: str, cadence: str, force: bool, petrinex_m
             click.echo(f"  {ds_id} ({config.expected_cadence}): {config.name}")
         return
 
+    if not dataset and not include_archives:
+        targets, skipped_archives = filter_archive_targets(targets, registry)
+        if skipped_archives:
+            click.echo(
+                "Skipping historical archive datasets in bulk ingest: "
+                + ", ".join(skipped_archives)
+            )
+            click.echo("Use backfill-archives or --include-archives to rebuild archives.")
+
     for ds_id in targets:
         try:
             click.echo(f"\n[INFO] Processing {ds_id}...")
@@ -129,6 +151,19 @@ def ingest(ingest_all: bool, dataset: str, cadence: str, force: bool, petrinex_m
         finally:
             # Force garbage collection between datasets to free memory
             gc.collect()
+
+
+def filter_archive_targets(targets: list[str], registry) -> tuple[list[str], list[str]]:
+    """Remove archive_list datasets from bulk ingest target lists."""
+    kept = []
+    skipped = []
+    for ds_id in targets:
+        config = registry.get(ds_id)
+        if config.source_type == 'archive_list':
+            skipped.append(ds_id)
+        else:
+            kept.append(ds_id)
+    return kept, skipped
 
 
 @cli.command('ingest-petrinex')
@@ -577,14 +612,7 @@ def backfill_archives(dataset: str):
                 raw_dir = data_dir / "raw" / dataset_id
                 raw_dir.mkdir(parents=True, exist_ok=True)
 
-                headers = {
-                    'User-Agent': 'AER-Data-Pipeline/1.0 (+https://github.com/QV2000/aer-data-pipeline)',
-                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-                    'Accept-Language': 'en-US,en;q=0.5',
-                    'Referer': 'https://www.aer.ca/',
-                }
-
-                resp = _get_session().get(url, headers=headers, timeout=120)
+                resp = _get_session().get(url, headers=DEFAULT_HTTP_HEADERS, timeout=120)
                 if resp.status_code != 200:
                     click.echo(f"    Skipped (HTTP {resp.status_code})")
                     continue

@@ -13,7 +13,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-from downloader.html_index import HtmlIndexDownloader
+from downloader.html_index import DEFAULT_HTTP_HEADERS, HtmlIndexDownloader
 from downloader.manifest import ManifestManager
 from registry.loader import DatasetConfig, SourceRegistry
 
@@ -225,9 +225,7 @@ class DatasetDownloader:
                     params = {**query_params, offset_param: offset, count_param: page_size}
                     logger.info(f"Fetching {self.config.id} offset={offset}...")
 
-                    resp = requests.get(base_url, params=params, timeout=120, headers={
-                        'User-Agent': 'aer-data-pipeline/1.0 (+https://github.com/QV2000/aer-data-pipeline)'
-                    })
+                    resp = requests.get(base_url, params=params, timeout=120, headers=DEFAULT_HTTP_HEADERS)
                     resp.raise_for_status()
 
                     data = resp.json()
